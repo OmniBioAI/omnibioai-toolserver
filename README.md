@@ -45,6 +45,7 @@ This contract matches the expectations of
 * Tools:
 
   * `enrichr_pathway` — Pathway enrichment via Enrichr (REST, multipart-safe)
+  * `david_annotation` — Functional annotation via DAVID (REST)
 * Execution model:
 
   * Stateless REST calls
@@ -155,7 +156,8 @@ No changes are required in TES beyond refreshing server capabilities.
 cd ~/Desktop/machine/omnibioai-toolserver
 pytest tests/ -v --cov=.
 
-# 100% coverage
+# 97% coverage (verified 2026-08-07; every toolserver/ module itself is
+# 100%, setup.py is the only file dragging the --cov=. total down)
 ```
 
 ---
@@ -192,6 +194,6 @@ pytest tests/ -v --cov=.
 | TES HttpToolServerAdapter integration | ✓ Stable |
 | Health endpoint | ✓ Stable |
 | REST tool lifecycle (submit/poll/results) | ✓ Stable |
-| Test coverage | ✓ 100% |
+| Test coverage | ✓ 97% (100% within `toolserver/` itself) |
 | Docker Compose deployment | ✓ Stable |
 
