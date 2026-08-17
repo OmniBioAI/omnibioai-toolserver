@@ -70,14 +70,27 @@ jobs:
             type=semver,pattern={{version}}
             type=raw,value=latest
 
+      # QEMU registers binfmt_misc handlers so the amd64 GitHub-hosted
+      # runner can emulate arm64 instructions -- required for Buildx to
+      # actually execute the arm64 half of the multi-platform build below.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # platforms: linux/amd64,linux/arm64 -- emits a single multi-arch
+      # manifest list under each tag from steps.meta.outputs.tags. All of
+      # requirements.txt (fastapi/uvicorn/httpx/pydantic/pyyaml) is
+      # pure-Python or ships manylinux aarch64 wheels (pydantic-core), and
+      # python:3.12-slim-bookworm publishes an arm64 variant, so no
+      # cross-compilation toolchain is needed for the emulated arm64 leg.
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
