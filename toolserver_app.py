@@ -26,7 +26,7 @@ def _new_run_id() -> str:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="omnibioai-toolserver")
+    app = FastAPI(title="omnibioai-toolserver", root_path="/_svc/toolserver")
 
     run_store_dir = "out/runs"
     store = RunStore(run_store_dir)
