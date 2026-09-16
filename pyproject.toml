@@ -15,6 +15,34 @@ dependencies = [
   "uvicorn>=0.23",
   "httpx>=0.27",
   "pydantic>=2",
+  # HIPAA-V2-019: delegated-execution authentication (toolserver/security.py)
+  # requires omnibioai-iam-client's iam_client.delegated API
+  # (require_delegated_execution / DelegatedExecutionIdentity), which pulls in
+  # redis + python-jose[cryptography] transitively (see that package's own
+  # pyproject.toml).
+  #
+  # REMOTE BUILD PENDING TAG PUSH -- v0.1.4 is the correct, intended target.
+  # It is a real, existing, annotated Git tag as of this change (commit
+  # 54f4d61, "Release v0.1.4: add delegated execution identity support"),
+  # independently verified by omnibioai-iam-client's own release-readiness
+  # review: 129/129 tests pass, the tag builds a real sdist/wheel containing
+  # iam_client/delegated.py, and a clean non-editable install from that exact
+  # tag (via `git+file://` locally) successfully imports
+  # DelegatedExecutionIdentity/validate_delegated_execution/
+  # require_delegated_execution/require_delegated_permission and passes all
+  # 41 delegated tests -- see omnibioai-iam-client's own
+  # omnibioai-docs/security/hipaa_v2_019_service_identity_design.md entry.
+  #
+  # However the tag exists ONLY LOCALLY -- it has not been pushed to
+  # github.com/OmniBioAI/omnibioai-iam-client. The `git+https://...@v0.1.4`
+  # reference below will 404 for any checkout/CI/Docker build that doesn't
+  # already have this exact local repository (i.e. everywhere except this
+  # machine) until that push happens. This is a deliberate, reported state
+  # (per this task's explicit "do not misrepresent remote resolvability"
+  # instruction), not an oversight. Local verification against the real
+  # local tag (not an editable install) is documented in
+  # requirements-dev.txt.
+  "omnibioai-iam-client @ git+https://github.com/OmniBioAI/omnibioai-iam-client.git@v0.1.4",
 ]
 
 [project.optional-dependencies]

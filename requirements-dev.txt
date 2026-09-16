@@ -1,3 +1,28 @@
 pytest>=8
 pytest-cov>=5
 ruff>=0.6
+
+# HIPAA-V2-019: local bare-metal dev/test convenience ONLY -- installs the
+# current omnibioai-iam-client working tree (sibling checkout, editable) so
+# tests/test_toolserver_delegated_auth.py and toolserver/security.py can
+# import iam_client.delegated without a rebuild-per-edit cycle. This is NOT
+# what CI or the Docker build use (both resolve requirements.txt's/
+# pyproject.toml's real `@v0.1.4` git-tag pin instead -- see those files'
+# own comments: that tag now exists (commit 54f4d61, annotated,
+# `git -C omnibioai-iam-client tag --list v0.1.4`) but has not been pushed,
+# so it currently resolves only on this machine), and this editable line
+# must never become the production dependency path.
+#
+# This package's release-readiness was independently verified WITHOUT this
+# editable install, twice: (1) a real sdist/wheel built via `python -m
+# build` and installed non-editably into a clean venv, and (2) the exact
+# `v0.1.4` git tag installed non-editably via
+# `pip install "omnibioai-iam-client[fastapi] @ git+file:///<path-to-
+# omnibioai-iam-client>@v0.1.4"` into a second, independent clean venv --
+# both installs resolved to that venv's own site-packages (confirmed via
+# `iam_client.__file__`, not this sibling checkout), reported version
+# 0.1.4, and passed all 41 delegated tests plus ToolServer's own full
+# suite. See omnibioai-docs/security/hipaa_v2_019_service_identity_design.md
+# for the exact commands and results. This editable line exists purely for
+# day-to-day local iteration, not as the verification mechanism.
+-e ../omnibioai-iam-client

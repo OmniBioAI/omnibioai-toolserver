@@ -3,3 +3,19 @@ uvicorn>=0.23
 httpx>=0.27
 pydantic>=2
 pyyaml
+
+# HIPAA-V2-019: toolserver/security.py's delegated-execution authentication
+# needs omnibioai-iam-client's iam_client.delegated API.
+#
+# REMOTE BUILD PENDING TAG PUSH -- v0.1.4 is a real, verified, annotated
+# Git tag (commit 54f4d61) as of this change, but it exists only in the
+# local omnibioai-iam-client checkout on this machine, not on
+# github.com/OmniBioAI/omnibioai-iam-client. This Dockerfile's `pip
+# install -r requirements.txt` will 404 on this line in any environment
+# other than this one until the tag is pushed -- that is the single
+# remaining release action, not a bug in this line. See pyproject.toml's
+# matching entry and
+# omnibioai-docs/security/hipaa_v2_019_service_identity_design.md for the
+# full release-readiness evidence (129/129 IAM tests, clean non-editable
+# tag install, 41/41 delegated tests against that install).
+omnibioai-iam-client @ git+https://github.com/OmniBioAI/omnibioai-iam-client.git@v0.1.4

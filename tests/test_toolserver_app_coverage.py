@@ -27,9 +27,20 @@ def test_create_app_yaml_not_found(capsys):
 # ── Line 120→122: get_results when state != COMPLETED ───────────────────────
 # Replace test_get_results_not_ready and add test for line 160
 
-# ── Lines 145-174: /register_tools endpoint ──────────────────────────────────
-def test_register_tools_with_http_block():
-    """Covers the http-handler branch in register_tools_endpoint."""
+# ── /register_tools: REGISTER_TOOLS_AUTHORIZATION_MODEL_UNRESOLVED ──────────
+# HIPAA-V2-019: this endpoint used to register arbitrary caller-supplied
+# HTTP-tool execution definitions with zero authentication and zero
+# permission model -- a code-execution-adjacent administrative capability
+# that Auth's delegated-execution permission set (workflow.execute,
+# runs.read) does not cover. Per the HIPAA-V2-019 follow-up, it is now
+# unconditionally disabled (fails closed, 501) rather than left
+# reachable under an ill-fitting permission -- see toolserver_app.py's
+# own comment on register_tools_endpoint. These four tests, which
+# previously asserted successful anonymous registration, are replaced by
+# tests asserting the new fail-closed behavior; the stub/http-handler
+# registration code paths they used to cover are now unreachable by
+# design, not merely untested.
+def test_register_tools_disabled_returns_501():
     from toolserver_app import create_app
     client = TestClient(create_app())
 
@@ -42,44 +53,39 @@ def test_register_tools_with_http_block():
             "method": "POST"
         }
     }]})
-    assert resp.status_code == 200
-    assert resp.json() == {"ok": True, "registered": 1}
+    assert resp.status_code == 501
+    assert "REGISTER_TOOLS_AUTHORIZATION_MODEL_UNRESOLVED" in resp.json()["detail"]
 
 
-def test_register_tools_without_http_block():
-    """Covers the stub-handler else branch in register_tools_endpoint."""
+def test_register_tools_disabled_regardless_of_payload_shape():
     from toolserver_app import create_app
     client = TestClient(create_app())
 
-    resp = client.post("/register_tools", json={"tools": [{
-        "tool_id": "my_stub_tool",
-        "version": "v1",
-    }]})
-    assert resp.status_code == 200
-    assert resp.json() == {"ok": True, "registered": 1}
+    resp = client.post("/register_tools", json={"tools": [{"tool_id": "my_stub_tool"}]})
+    assert resp.status_code == 501
 
 
-def test_register_tools_skips_missing_tool_id():
-    """Covers the 'if not tool_id: continue' branch."""
-    from toolserver_app import create_app
-    client = TestClient(create_app())
-
-    resp = client.post("/register_tools", json={"tools": [
-        {},                          # no tool_id → skipped
-        {"tool_id": "valid_tool"},   # registered
-    ]})
-    assert resp.status_code == 200
-    assert resp.json() == {"ok": True, "registered": 1}
-
-
-def test_register_tools_empty():
-    """Edge case: empty tools list."""
+def test_register_tools_disabled_for_empty_tools_list():
     from toolserver_app import create_app
     client = TestClient(create_app())
 
     resp = client.post("/register_tools", json={"tools": []})
-    assert resp.status_code == 200
-    assert resp.json() == {"ok": True, "registered": 0}
+    assert resp.status_code == 501
+
+
+def test_register_tools_disabled_does_not_mutate_registry():
+    """No tool_def -- valid or not -- can be registered through this
+    endpoint anymore; nothing about a request body changes that."""
+    from toolserver_app import create_app
+    client = TestClient(create_app())
+
+    client.post("/register_tools", json={"tools": [
+        {},
+        {"tool_id": "should_never_register"},
+    ]})
+    caps = client.get("/capabilities").json()
+    tool_ids = {t["tool_id"] for t in caps["tools"]}
+    assert "should_never_register" not in tool_ids
 
 
 # ── Line 42: YAML file found → load_tools_from_yaml called ──────────────────

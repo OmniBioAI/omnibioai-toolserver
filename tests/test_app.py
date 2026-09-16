@@ -20,6 +20,8 @@ from fastapi.testclient import TestClient
 from toolserver.models import RunRecord
 from toolserver.store import RunStore
 
+from .conftest import _authorize
+
 # ===========================================================================
 # Shared fake run / helpers
 # ===========================================================================
@@ -74,6 +76,7 @@ def _make_client(monkeypatch, tmp_path, run_fn=None):
 
     from toolserver_app import create_app
     app = create_app()
+    _authorize(app)  # HIPAA-V2-019: see conftest.py's own comment
     client = TestClient(app, raise_server_exceptions=False)
 
     # The store create_app() is actually using
@@ -401,6 +404,7 @@ class TestGetLogs:
         rec = RunRecord(
             run_id="log-many", tool_id="enrichr_pathway", state="COMPLETED",
             created_epoch=1_700_000_000, updated_epoch=1_700_000_001,
+            organization_id="test-org",
             inputs={}, resources={}, logs=[f"line-{i}" for i in range(50)],
             results={"ok": True}, error=None,
         )
@@ -413,6 +417,7 @@ class TestGetLogs:
         rec = RunRecord(
             run_id="log-tail", tool_id="enrichr_pathway", state="COMPLETED",
             created_epoch=1_700_000_000, updated_epoch=1_700_000_001,
+            organization_id="test-org",
             inputs={}, resources={}, logs=[f"line-{i}" for i in range(10)],
             results={"ok": True}, error=None,
         )
@@ -426,6 +431,7 @@ class TestGetLogs:
         rec = RunRecord(
             run_id="log-default", tool_id="enrichr_pathway", state="COMPLETED",
             created_epoch=1_700_000_000, updated_epoch=1_700_000_001,
+            organization_id="test-org",
             inputs={}, resources={}, logs=[f"line-{i}" for i in range(300)],
             results={"ok": True}, error=None,
         )
@@ -439,6 +445,7 @@ class TestGetLogs:
         rec = RunRecord(
             run_id="log-tail-zero", tool_id="enrichr_pathway", state="COMPLETED",
             created_epoch=1_700_000_000, updated_epoch=1_700_000_001,
+            organization_id="test-org",
             inputs={}, resources={}, logs=[f"line-{i}" for i in range(5)],
             results={"ok": True}, error=None,
         )
@@ -458,6 +465,7 @@ class TestGetResults:
         store.create(RunRecord(
             run_id=run_id, tool_id="enrichr_pathway", state=state,
             created_epoch=1_700_000_000, updated_epoch=1_700_000_001,
+            organization_id="test-org",
             inputs={}, resources={}, logs=[], results=results, error=error,
         ))
 
@@ -524,27 +532,35 @@ class TestGetResults:
 
 
 # ===========================================================================
-# /register_tools → stub run execution (line 160)
+# /register_tools — REGISTER_TOOLS_AUTHORIZATION_MODEL_UNRESOLVED
 # ===========================================================================
+# HIPAA-V2-019: the runtime /register_tools HTTP endpoint (registering an
+# arbitrary caller-supplied non-http "stub" tool_def, then submitting a
+# run against it to reach the stub's NotImplementedError) is no longer
+# reachable through the public API at all -- this endpoint is
+# unconditionally disabled (see toolserver_app.py's own comment). That
+# specific stub-registration code path in the old register_tools_endpoint
+# body was deleted along with the rest of that handler, not merely left
+# untested; the equivalent-strength replacement (proving the disabled
+# endpoint's exact fail-closed shape) lives in
+# test_toolserver_app_coverage.py's register_tools tests.
 
-class TestStubRunExecution:
+class TestRegisterToolsDisabled:
 
-    def test_stub_run_raises_not_implemented_reaches_failed(self, ctx):
-        """Line 160: _stub_run raises NotImplementedError → executor marks run FAILED."""
-        client, store = ctx
+    def test_register_tools_returns_501_even_when_authenticated(self, ctx):
+        """An authenticated caller (this file's fixtures always are, via
+        conftest.py's dependency override) gets the exact same denial as
+        an unauthenticated one -- there is no delegated permission that
+        can unlock this endpoint today."""
+        client, _ = ctx
+        resp = client.post("/register_tools", json={"tools": [{"tool_id": "stub_exec_tool"}]})
+        assert resp.status_code == 501
 
-        # Register a non-http tool — creates _stub_validate + _stub_run
-        reg = client.post("/register_tools", json={"tools": [{"tool_id": "stub_exec_tool"}]})
-        assert reg.json()["registered"] == 1
-
-        # Validation passes (_stub_validate always ok=True), run is submitted
+    def test_register_tools_disabled_leaves_tool_unregistered(self, ctx):
+        client, _ = ctx
+        client.post("/register_tools", json={"tools": [{"tool_id": "stub_exec_tool"}]})
         resp = client.post("/runs", json={
             "tool_id": "stub_exec_tool", "inputs": {}, "resources": {},
         })
-        assert resp.status_code == 200
-        run_id = resp.json()["run_id"]
-
-        # _stub_run raises NotImplementedError → executor catches → FAILED
-        _wait_for_state(store, run_id, "FAILED")
-        error_msg = store.get(run_id).error["message"]
-        assert "has no http block" in error_msg
+        assert resp.status_code == 400
+        assert resp.json()["error"]["details"]["errors"][0]["code"] == "UNKNOWN_TOOL"
