@@ -1,3 +1,18 @@
+"""
+Shared pytest fixtures for the ToolServer test suite.
+
+Provides a FastAPI TestClient wired with fixed, pre-authorized fake
+delegated-execution identities (via require_workflow_execute /
+require_runs_read dependency overrides) and a monkeypatched tool runner,
+so most tests can exercise run/validate/results business logic without
+real Auth/IAM connectivity or real tool network calls. Authentication
+and authorization behavior itself is exercised separately, without this
+override, in tests/test_toolserver_delegated_auth.py.
+
+Developer:
+    Manish Kumar <manish@omnibioai.org>
+"""
+
 from __future__ import annotations
 
 import time
@@ -37,12 +52,14 @@ FAKE_READ_IDENTITY = DelegatedExecutionIdentity(
 
 
 def _authorize(app) -> None:
+    """Override the delegated-execution dependencies with fixed, already-authorized fake identities so callers skip real Auth/IAM."""
     app.dependency_overrides[require_workflow_execute] = lambda: FAKE_EXECUTE_IDENTITY
     app.dependency_overrides[require_runs_read] = lambda: FAKE_READ_IDENTITY
 
 
 @pytest.fixture()
 def client(monkeypatch, tmp_path):
+    """Build a TestClient with an isolated run-store directory, a network-free patched tool runner, and fake authorization already applied."""
     # Ensure RunStore writes into temp
     monkeypatch.setenv("TOOLSERVER_RUN_STORE_DIR", str(tmp_path / "runs"))
 

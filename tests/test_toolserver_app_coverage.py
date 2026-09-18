@@ -1,4 +1,11 @@
 # tests/test_toolserver_app_coverage.py
+"""
+Coverage-focused tests for toolserver_app.py's app-creation branches
+(tools YAML present/absent) and the disabled /register_tools endpoint.
+
+Developer:
+    Manish Kumar <manish@omnibioai.org>
+"""
 import pytest
 import yaml
 from fastapi.testclient import TestClient
@@ -41,6 +48,7 @@ def test_create_app_yaml_not_found(capsys):
 # registration code paths they used to cover are now unreachable by
 # design, not merely untested.
 def test_register_tools_disabled_returns_501():
+    """Reject a well-formed HTTP-tool registration with 501 and the REGISTER_TOOLS_AUTHORIZATION_MODEL_UNRESOLVED code."""
     from toolserver_app import create_app
     client = TestClient(create_app())
 
@@ -58,6 +66,7 @@ def test_register_tools_disabled_returns_501():
 
 
 def test_register_tools_disabled_regardless_of_payload_shape():
+    """Reject a minimal/stub-shaped registration payload with 501 just like a full one."""
     from toolserver_app import create_app
     client = TestClient(create_app())
 
@@ -66,6 +75,7 @@ def test_register_tools_disabled_regardless_of_payload_shape():
 
 
 def test_register_tools_disabled_for_empty_tools_list():
+    """Reject registration with 501 even when the tools list is empty."""
     from toolserver_app import create_app
     client = TestClient(create_app())
 

@@ -1,4 +1,14 @@
+"""
+Tests for ToolServer's core HTTP endpoints: health, capabilities,
+validation, and the create-run-to-completion happy path.
+
+Developer:
+    Manish Kumar <manish@omnibioai.org>
+"""
+
+
 def test_health(client):
+    """Return 200 with ok=True and a service identifier."""
     r = client.get("/health")
     assert r.status_code == 200
     body = r.json()
@@ -7,6 +17,7 @@ def test_health(client):
 
 
 def test_capabilities(client):
+    """List registered engines and tools, including enrichr_pathway."""
     r = client.get("/capabilities")
     assert r.status_code == 200
     caps = r.json()
@@ -17,6 +28,7 @@ def test_capabilities(client):
 
 
 def test_validate_unknown_tool(client):
+    """Report UNKNOWN_TOOL as a validation error, not an HTTP failure, for an unregistered tool_id."""
     r = client.post("/validate", json={"tool_id": "nope", "inputs": {}, "resources": {}})
     assert r.status_code == 200
     body = r.json()
@@ -25,6 +37,7 @@ def test_validate_unknown_tool(client):
 
 
 def test_validate_enrichr_pathway_requires_genes(client):
+    """Flag the missing required "genes" field when validating enrichr_pathway inputs."""
     r = client.post("/validate", json={"tool_id": "enrichr_pathway", "inputs": {}, "resources": {}})
     assert r.status_code == 200
     body = r.json()
@@ -33,6 +46,7 @@ def test_validate_enrichr_pathway_requires_genes(client):
 
 
 def test_create_run_validation_fails(client):
+    """Reject run creation with 400 VALIDATION_FAILED when required inputs are missing."""
     r = client.post("/runs", json={"tool_id": "enrichr_pathway", "inputs": {}, "resources": {}})
     assert r.status_code == 400
     body = r.json()
@@ -41,6 +55,7 @@ def test_create_run_validation_fails(client):
 
 
 def test_create_run_and_poll_to_complete(client):
+    """Drive a valid run from creation through COMPLETED state, with logs and results populated along the way."""
     req = {
         "tool_id": "enrichr_pathway",
         "inputs": {"genes": ["TP53", "BRCA1"], "top_n": 10},
