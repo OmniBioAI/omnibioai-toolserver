@@ -34,21 +34,14 @@ def test_create_app_yaml_not_found(capsys):
 # ── Line 120→122: get_results when state != COMPLETED ───────────────────────
 # Replace test_get_results_not_ready and add test for line 160
 
-# ── /register_tools: REGISTER_TOOLS_AUTHORIZATION_MODEL_UNRESOLVED ──────────
-# HIPAA-V2-019: this endpoint used to register arbitrary caller-supplied
-# HTTP-tool execution definitions with zero authentication and zero
-# permission model -- a code-execution-adjacent administrative capability
-# that Auth's delegated-execution permission set (workflow.execute,
-# runs.read) does not cover. Per the HIPAA-V2-019 follow-up, it is now
-# unconditionally disabled (fails closed, 501) rather than left
-# reachable under an ill-fitting permission -- see toolserver_app.py's
-# own comment on register_tools_endpoint. These four tests, which
-# previously asserted successful anonymous registration, are replaced by
-# tests asserting the new fail-closed behavior; the stub/http-handler
-# registration code paths they used to cover are now unreachable by
-# design, not merely untested.
-def test_register_tools_disabled_returns_501():
-    """Reject a well-formed HTTP-tool registration with 501 and the REGISTER_TOOLS_AUTHORIZATION_MODEL_UNRESOLVED code."""
+# ── /register_tools: anonymous callers are rejected ──────────────────────────
+# HIPAA-V2-019: registration requires Auth's service-only
+# toolserver_registration credential from an allowlisted service identity
+# (TES). The full authenticated contract is in
+# tests/test_toolserver_registration_auth.py; these keep the anonymous cases
+# next to the rest of the app coverage.
+def test_register_tools_anonymous_is_rejected():
+    """Reject an anonymous, well-formed HTTP-tool registration with 401."""
     from toolserver_app import create_app
     client = TestClient(create_app())
 
@@ -61,37 +54,26 @@ def test_register_tools_disabled_returns_501():
             "method": "POST"
         }
     }]})
-    assert resp.status_code == 501
-    assert "REGISTER_TOOLS_AUTHORIZATION_MODEL_UNRESOLVED" in resp.json()["detail"]
+    assert resp.status_code == 401
 
 
-def test_register_tools_disabled_regardless_of_payload_shape():
-    """Reject a minimal/stub-shaped registration payload with 501 just like a full one."""
-    from toolserver_app import create_app
-    client = TestClient(create_app())
-
-    resp = client.post("/register_tools", json={"tools": [{"tool_id": "my_stub_tool"}]})
-    assert resp.status_code == 501
-
-
-def test_register_tools_disabled_for_empty_tools_list():
-    """Reject registration with 501 even when the tools list is empty."""
+def test_register_tools_anonymous_rejected_for_empty_tools_list():
+    """Reject anonymous registration with 401 even when the tools list is empty."""
     from toolserver_app import create_app
     client = TestClient(create_app())
 
     resp = client.post("/register_tools", json={"tools": []})
-    assert resp.status_code == 501
+    assert resp.status_code == 401
 
 
-def test_register_tools_disabled_does_not_mutate_registry():
-    """No tool_def -- valid or not -- can be registered through this
-    endpoint anymore; nothing about a request body changes that."""
+def test_register_tools_anonymous_does_not_mutate_registry():
+    """An anonymous request can never add a tool, whatever its body."""
     from toolserver_app import create_app
     client = TestClient(create_app())
 
     client.post("/register_tools", json={"tools": [
         {},
-        {"tool_id": "should_never_register"},
+        {"tool_id": "should_never_register", "http": {"url": "http://example.com"}},
     ]})
     caps = client.get("/capabilities").json()
     tool_ids = {t["tool_id"] for t in caps["tools"]}

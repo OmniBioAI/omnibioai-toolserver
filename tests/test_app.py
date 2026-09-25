@@ -619,16 +619,17 @@ class TestGetResults:
 # test_toolserver_app_coverage.py's register_tools tests.
 
 class TestRegisterToolsDisabled:
-    """POST /register_tools is unconditionally disabled, with no delegated permission able to unlock it."""
+    """POST /register_tools is not unlocked by delegated execution authority."""
 
     def test_register_tools_returns_501_even_when_authenticated(self, ctx):
-        """An authenticated caller (this file's fixtures always are, via
-        conftest.py's dependency override) gets the exact same denial as
-        an unauthenticated one -- there is no delegated permission that
-        can unlock this endpoint today."""
+        """This file's fixtures are authenticated for /runs and /validate
+        (conftest.py overrides the delegated dependencies), but that
+        authority does not extend to registration, which requires TES's
+        separate service-only credential: a request without one is 401.
+        (Name kept for history; the endpoint now answers 401, not 501.)"""
         client, _ = ctx
         resp = client.post("/register_tools", json={"tools": [{"tool_id": "stub_exec_tool"}]})
-        assert resp.status_code == 501
+        assert resp.status_code == 401
 
     def test_register_tools_disabled_leaves_tool_unregistered(self, ctx):
         """Since /register_tools is a no-op, a "registered" tool_id never
