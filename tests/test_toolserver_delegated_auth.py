@@ -103,6 +103,9 @@ def _mock_iam(
         fake_client.validate_delegated_execution = AsyncMock(side_effect=side_effect)
     else:
         fake_client.validate_delegated_execution = AsyncMock(return_value=return_value)
+    # A delegated credential is never a registration credential (Auth's
+    # registration introspection answers valid=false for it).
+    fake_client.validate_toolserver_registration = AsyncMock(return_value=None)
     monkeypatch.setattr(security_mod, "get_iam_client", lambda: fake_client)
     return fake_client
 
@@ -636,29 +639,25 @@ class TestNoAnonymousFallbackAcrossRoutes:
 # /register_tools: unconditionally disabled, regardless of credential
 # ===========================================================================
 
-class TestRegisterToolsUnresolved:
-    """POST /register_tools stays unconditionally disabled (501) under
-    the new auth layer too -- neither a valid delegated credential nor
-    the absence of one changes that outcome, since the endpoint is
-    disabled before any permission check runs."""
+class TestRegisterToolsNotUnlockedByDelegation:
+    """POST /register_tools accepts only TES's service-only registration
+    credential (tests/test_toolserver_registration_auth.py). A delegated
+    user credential -- even one holding both execution permissions -- and
+    no credential at all are both rejected (401), before any tool is
+    registered."""
 
     def test_register_tools_denied_even_with_valid_credential(self, client, monkeypatch):
-        """A request carrying a fully valid, both-permissions delegated
-        credential still gets 501 from /register_tools -- the disabled
-        endpoint is reached before any permission check, so no
-        credential can unlock it."""
+        """A fully valid, both-permissions delegated credential cannot register tools."""
         _mock_iam(monkeypatch, return_value=BOTH_IDENTITY)
         resp = client.post(
             "/register_tools", json={"tools": [{"tool_id": "x"}]}, headers=_bearer(),
         )
-        assert resp.status_code == 501
+        assert resp.status_code == 401
 
     def test_register_tools_denied_without_any_credential(self, client):
-        """A request with no credential at all also gets 501, the same
-        as an authenticated one -- proving the 501 comes from the
-        endpoint being disabled, not from an auth failure."""
+        """A request with no credential at all is rejected with 401."""
         resp = client.post("/register_tools", json={"tools": [{"tool_id": "x"}]})
-        assert resp.status_code == 501
+        assert resp.status_code == 401
 
 
 # ===========================================================================

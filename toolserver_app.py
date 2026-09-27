@@ -5,15 +5,16 @@ import secrets
 import time
 from typing import Any, Dict, List
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse
-from iam_client import DelegatedExecutionIdentity
+from iam_client import DelegatedExecutionIdentity, ServiceRegistrationIdentity
 from pydantic import BaseModel
 
+from toolserver.adapters.http_tool_executor import make_run, make_validate
 from toolserver.executor import Executor
 from toolserver.models import RunCreateRequest, RunRecord, ValidateRequest
-from toolserver.registry import ToolRegistry
-from toolserver.security import require_runs_read, require_workflow_execute
+from toolserver.registry import ToolHandler, ToolRegistry
+from toolserver.security import require_runs_read, require_tes_registration, require_workflow_execute
 from toolserver.store import RunStore
 from toolserver.tools import load_tools_from_yaml, register_tools
 
@@ -202,34 +203,45 @@ def create_app() -> FastAPI:
         return rec.results or {"ok": True, "results": {}}
 
     # ----------------
-    # Register tools -- REGISTER_TOOLS AUTHORIZATION MODEL UNRESOLVED
+    # Register tools -- TES service identity only
     # ----------------
-    # HIPAA-V2-019: this endpoint lets a caller inject arbitrary HTTP-tool
-    # execution definitions (registry.register -> handler.run is later
-    # invoked by /runs) -- a code-execution-adjacent administrative
-    # capability, not a `workflow.execute`/`runs.read` operation. Auth's
-    # delegated_execution_service.py::ACCEPTED_PERMISSIONS is exactly
-    # {"workflow.execute", "runs.read"} today; no administrative/tool-
-    # registration permission exists in the delegated-execution model,
-    # and HIPAA-V2-019 Section 9 explicitly reserves this exact case
-    # ("do not grant workflow.manage merely because ToolServer has a
-    # registration endpoint") for a separately approved capability that
-    # does not exist yet. Rather than leave this reachable with no
-    # permission model, or misuse an existing permission that does not
-    # actually authorize it, this endpoint is disabled (fails closed)
-    # until an explicit administrative permission is defined and
-    # reviewed. This is a deliberate, reported blocker/follow-up, not an
-    # oversight -- see the HIPAA-V2-019 design document.
+    # HIPAA-V2-019: registering HTTP-tool definitions is an administrative,
+    # code-execution-adjacent capability (a registered handler is later run
+    # by /runs), so it is not a workflow.execute/runs.read operation and is
+    # never reachable with a user or delegated-execution credential. It
+    # requires Auth's service-only `toolserver_registration` credential
+    # (scope toolserver.register, ToolServer audience, no user principal)
+    # from a service identity listed in TOOLSERVER_REGISTRATION_CLIENT_IDS
+    # -- in production, exactly TES, which registers its declarative HTTP
+    # tools once at startup. Only tools with an `http` block are accepted;
+    # the credential is never logged.
     @app.post("/register_tools")
-    def register_tools_endpoint(req: RegisterToolsRequest):
-        raise HTTPException(
-            status_code=501,
-            detail=(
-                "REGISTER_TOOLS_AUTHORIZATION_MODEL_UNRESOLVED: tool registration has no "
-                "defined delegated/administrative permission and is disabled pending "
-                "HIPAA-V2-019 follow-up"
-            ),
+    def register_tools_endpoint(
+        req: RegisterToolsRequest,
+        identity: ServiceRegistrationIdentity = Depends(require_tes_registration),  # noqa: B008
+    ):
+        registered = 0
+        skipped = 0
+        for tool_def in req.tools:
+            tool_id = tool_def.get("tool_id")
+            if not tool_id or not isinstance(tool_def.get("http"), dict):
+                skipped += 1
+                continue
+            registry.register(
+                ToolHandler(
+                    tool_id=tool_id,
+                    validate=make_validate(tool_def),
+                    run=make_run(tool_def),
+                    version=tool_def.get("version", "v1"),
+                    features=tool_def.get("features") or {},
+                )
+            )
+            registered += 1
+        print(
+            f"[toolserver] register_tools: service={identity.calling_service} "
+            f"registered={registered} skipped={skipped}"
         )
+        return {"ok": True, "registered": registered, "skipped": skipped}
 
     # ----------------
     # Health

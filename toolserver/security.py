@@ -42,8 +42,9 @@ import os
 from typing import Optional
 
 from fastapi import Header
-from iam_client import AsyncIAMClient, DelegatedExecutionIdentity
+from iam_client import AsyncIAMClient, DelegatedExecutionIdentity, ServiceRegistrationIdentity
 from iam_client.delegated import require_delegated_execution
+from iam_client.registration import require_toolserver_registration
 
 # Matches every other IAM_URL consumer in this workspace (omnibioai-tes,
 # omnibioai-api-gateway, ...) -- already wired into Studio's compose file
@@ -99,4 +100,34 @@ async def require_runs_read(
     """Protects run status/logs/results. Same fail-closed/401-vs-403
     behavior as require_workflow_execute, scoped to `runs.read`."""
     dependency = require_delegated_execution(get_iam_client(), RUNS_READ)
+    return await dependency(authorization=authorization)
+
+
+# Service identities (Auth OAuth client_ids) allowed to register tools.
+# Comma-separated; empty/unset denies every registration (fail closed). In
+# production this is exactly TES's own OAuth client_id.
+REGISTRATION_CLIENT_IDS_ENV = "TOOLSERVER_REGISTRATION_CLIENT_IDS"
+
+
+def registration_client_allowlist() -> frozenset[str]:
+    raw = os.environ.get(REGISTRATION_CLIENT_IDS_ENV, "")
+    return frozenset(part.strip() for part in raw.split(",") if part.strip())
+
+
+async def require_tes_registration(
+    authorization: Optional[str] = Header(default=None),
+) -> ServiceRegistrationIdentity:
+    """Protects POST /register_tools. Accepts only Auth's service-only
+    `toolserver_registration` credential (ToolServer audience, scope
+    `toolserver.register`, no user principal), validated live through
+    Auth's registration introspection by omnibioai-iam-client.
+
+    401: missing/malformed/invalid/expired/revoked/wrong-audience/wrong-type
+    credential, including every user and delegated-execution token.
+    403: a valid registration credential from a service identity that is not
+    in TOOLSERVER_REGISTRATION_CLIENT_IDS.
+
+    It never satisfies require_workflow_execute/require_runs_read, which only
+    accept `delegated_execution` credentials."""
+    dependency = require_toolserver_registration(get_iam_client(), registration_client_allowlist())
     return await dependency(authorization=authorization)

@@ -16,7 +16,7 @@ Developer:
 from __future__ import annotations
 
 import time
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -100,6 +100,9 @@ def _mock_iam_fixed(monkeypatch, identity: DelegatedExecutionIdentity):
         return identity
 
     fake_client.validate_delegated_execution = _validate
+    # A delegated credential is never a registration credential (Auth's
+    # registration introspection answers valid=false for it).
+    fake_client.validate_toolserver_registration = AsyncMock(return_value=None)
     monkeypatch.setattr(security_mod, "get_iam_client", lambda: fake_client)
     return fake_client
 
@@ -640,13 +643,12 @@ class TestUnaffectedSurfaces:
         assert resp.status_code == 401
 
     def test_register_tools_remains_fail_closed(self, client, monkeypatch):
-        """/register_tools remains unconditionally disabled (501) even
-        for an otherwise validly-authenticated caller -- unaffected by
-        the ownership feature."""
+        """/register_tools stays closed to a validly-authenticated delegated
+        user credential (401): only TES's service-only registration
+        credential can register tools -- unaffected by the ownership feature."""
         _mock_iam_fixed(monkeypatch, EXECUTE_A)
         resp = client.post("/register_tools", json={"tools": [{"tool_id": "x"}]}, headers=_bearer())
-        assert resp.status_code == 501
-        assert "REGISTER_TOOLS_AUTHORIZATION_MODEL_UNRESOLVED" in resp.json()["detail"]
+        assert resp.status_code == 401
 
 
 # ===========================================================================
