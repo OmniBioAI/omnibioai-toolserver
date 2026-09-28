@@ -2,8 +2,10 @@
 
 A standalone **HTTP ToolServer** for the **OmniBioAI** ecosystem.
 
-This service implements the REST contract expected by
-`omnibioai-tes (Tool Execution Service, legacy package name: `omnibioai-tes`) `HttpToolServerAdapter`, enabling **secure, validated, and reproducible execution of REST-backed bioinformatics tools** (e.g. Enrichr, annotation services, external APIs).
+This service implements the REST contract expected by the
+`omnibioai-tes` (Tool Execution Service) `HttpToolServerAdapter`, enabling
+validated execution of REST-backed bioinformatics tools such as Enrichr and
+annotation services.
 
 It is designed to run **independently** and be registered as a remote execution server in OmniBioAI TES.
 
@@ -156,8 +158,8 @@ No changes are required in TES beyond refreshing server capabilities.
 cd ~/Desktop/machine/omnibioai-toolserver
 pytest tests/ -v --cov=.
 
-# 97% coverage (verified 2026-08-07; every toolserver/ module itself is
-# 100%, setup.py is the only file dragging the --cov=. total down)
+# Coverage figures from earlier dated runs are historical snapshots; run the
+# command above to measure the current checkout.
 ```
 
 ---
@@ -194,6 +196,15 @@ pytest tests/ -v --cov=.
 | TES HttpToolServerAdapter integration | ✓ Stable |
 | Health endpoint | ✓ Stable |
 | REST tool lifecycle (submit/poll/results) | ✓ Stable |
-| Test coverage | ✓ 97% (100% within `toolserver/` itself) |
+| Test coverage | Historical figures are described in the Testing section; verify current status by running the suite |
 | Docker Compose deployment | ✓ Stable |
 
+## Authoritative Sources
+
+The API route wiring and request/response models are authoritative in
+`toolserver_app.py` and `toolserver/models.py`. Authentication and delegated
+execution requirements are implemented in `toolserver/security.py`; tool
+registration is implemented by the tool registry under `toolserver/registry.py`
+and the tool modules. TES server registration belongs to TES structured server
+configuration and its discovery/registration flow; this README intentionally
+does not duplicate that catalog.
