@@ -3,6 +3,9 @@ uvicorn>=0.23
 httpx>=0.27
 pydantic>=2
 pyyaml
+# Keep the IAM client's transitive cryptography dependency on the validated
+# ARM64-compatible range; newer wheels use unsupported instructions here.
+cryptography>=43,<47
 
 # HIPAA-V2-019: toolserver/security.py's delegated-execution authentication
 # needs omnibioai-iam-client's iam_client.delegated API.

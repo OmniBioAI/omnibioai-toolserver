@@ -39,5 +39,15 @@ COPY toolserver/ ./toolserver/
 COPY toolserver_app.py .
 COPY scripts/ ./scripts/
 
+RUN groupadd --system --gid 10001 omnibioai \
+ && useradd --system --uid 10001 --gid 10001 --create-home --home-dir /home/omnibioai omnibioai \
+ && mkdir -p /app/out/runs \
+ && chown -R omnibioai:omnibioai /app /home/omnibioai
+
+USER omnibioai
+ENV HOME=/home/omnibioai TMPDIR=/tmp
+
 EXPOSE 9090
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:9090/health || exit 1
 CMD ["uvicorn", "toolserver_app:create_app", "--factory", "--host", "0.0.0.0", "--port", "9090"]
