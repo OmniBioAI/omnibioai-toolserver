@@ -1,3 +1,13 @@
+"""
+OmniBioAI toolserver.registry.
+
+Purpose:
+    Defines ToolHandler and ToolRegistry for toolserver.registry.
+
+Author:
+    Manish Kumar <manish@omnibioai.org>
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

@@ -1,3 +1,13 @@
+"""
+OmniBioAI toolserver.models.
+
+Purpose:
+    Defines ValidateRequest, RunCreateRequest, RunStatusResponse and RunRecord for toolserver.models.
+
+Author:
+    Manish Kumar <manish@omnibioai.org>
+"""
+
 from __future__ import annotations
 
 from typing import Any, Dict, List, Literal, Optional

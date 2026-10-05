@@ -1,3 +1,13 @@
+"""
+OmniBioAI toolserver.adapters.http_tool_executor.
+
+Purpose:
+    Defines make_validate and make_run for toolserver.adapters.http_tool_executor.
+
+Author:
+    Manish Kumar <manish@omnibioai.org>
+"""
+
 from __future__ import annotations
 
 import re

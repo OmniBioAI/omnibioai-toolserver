@@ -1,3 +1,13 @@
+"""
+OmniBioAI toolserver.executor.
+
+Purpose:
+    Defines Executor with submit methods for toolserver.executor.
+
+Author:
+    Manish Kumar <manish@omnibioai.org>
+"""
+
 from __future__ import annotations
 
 import time

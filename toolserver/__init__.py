@@ -1,3 +1,13 @@
+"""
+OmniBioAI toolserver.
+
+Purpose:
+    Initializes the toolserver package and imports executor, models, registry and store.
+
+Author:
+    Manish Kumar <manish@omnibioai.org>
+"""
+
 from __future__ import annotations
 
 from .executor import Executor

@@ -1,3 +1,13 @@
+"""
+OmniBioAI toolserver_app.
+
+Purpose:
+    Defines RegisterToolsRequest and create_app for toolserver_app.
+
+Author:
+    Manish Kumar <manish@omnibioai.org>
+"""
+
 from __future__ import annotations
 
 import os
