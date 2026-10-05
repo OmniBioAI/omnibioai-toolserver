@@ -1,3 +1,13 @@
+"""
+OmniBioAI toolserver.tools.david_annotation.
+
+Purpose:
+    Defines _validate, _soap, _parse_chart_records and _run for toolserver.tools.david_annotation.
+
+Author:
+    Manish Kumar <manish@omnibioai.org>
+"""
+
 from __future__ import annotations
 import re
 import xml.etree.ElementTree as ET

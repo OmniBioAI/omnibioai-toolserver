@@ -1,5 +1,15 @@
 # toolserver/tools/__init__.py
 
+"""
+OmniBioAI toolserver.tools.
+
+Purpose:
+    Defines register_tools and load_tools_from_yaml for toolserver.tools.
+
+Author:
+    Manish Kumar <manish@omnibioai.org>
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
