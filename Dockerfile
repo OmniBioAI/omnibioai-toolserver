@@ -1,4 +1,8 @@
 # syntax=docker/dockerfile:1
+# OmniBioAI — Tool Server
+# Purpose: Build the tool server API container.
+# Author: Manish Kumar <manish@omnibioai.org>
+
 # omnibioai-toolserver/Dockerfile.new
 FROM python:3.12-slim-bookworm
 
@@ -6,12 +10,15 @@ LABEL org.opencontainers.image.source=https://github.com/man4ish/omnibioai
 
 WORKDIR /app
 
+# System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl git \
     && rm -rf /var/lib/apt/lists/*
 
+# Runtime configuration
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 
+# Python dependencies
 COPY requirements.txt .
 # HIPAA-V2-019: requirements.txt pins omnibioai-iam-client (private repo)
 # as a git+https dependency, so pip needs git plus a GitHub credential.
@@ -35,6 +42,7 @@ RUN --mount=type=secret,id=github_token \
     GIT_ASKPASS=/tmp/git-askpass GIT_TERMINAL_PROMPT=0 \
       pip install --no-cache-dir -r requirements.txt
 
+# Application source
 COPY toolserver/ ./toolserver/
 COPY toolserver_app.py .
 COPY scripts/ ./scripts/
@@ -48,6 +56,8 @@ USER omnibioai
 ENV HOME=/home/omnibioai TMPDIR=/tmp
 
 EXPOSE 9090
+# Health check
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
   CMD curl -fsS http://127.0.0.1:9090/health || exit 1
+# Entrypoint and default command
 CMD ["uvicorn", "toolserver_app:create_app", "--factory", "--host", "0.0.0.0", "--port", "9090"]

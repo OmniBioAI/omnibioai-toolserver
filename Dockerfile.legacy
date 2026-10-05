@@ -1,4 +1,8 @@
 # syntax=docker/dockerfile:1
+# OmniBioAI — Tool Server Legacy
+# Purpose: Build the legacy Python tool server API container.
+# Author: Manish Kumar <manish@omnibioai.org>
+
 
 FROM python:3.13-slim
 
@@ -8,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
   && rm -rf /var/lib/apt/lists/*
 
+# Runtime configuration
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
