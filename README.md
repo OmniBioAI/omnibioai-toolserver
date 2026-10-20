@@ -66,7 +66,7 @@ This contract matches the expectations of
 ### Via OmniBioAI Studio (recommended)
 
 ```bash
-cd ~/Desktop/machine/omnibioai-studio
+cd ~/Desktop/omnibioai-ecosystem/omnibioai-studio
 docker compose up -d toolserver
 ```
 
@@ -155,7 +155,7 @@ No changes are required in TES beyond refreshing server capabilities.
 ## Testing
 
 ```bash
-cd ~/Desktop/machine/omnibioai-toolserver
+cd ~/Desktop/omnibioai-ecosystem/omnibioai-toolserver
 pytest tests/ -v --cov=.
 
 # Coverage figures from earlier dated runs are historical snapshots; run the
