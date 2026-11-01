@@ -15,6 +15,13 @@ from typing import Any, Callable, Dict, List
 
 import httpx
 
+MAX_REDIRECTS = 5
+_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+# Header names that carry credentials; dropped when a redirect changes host.
+_SENSITIVE_HEADER_RE = re.compile(
+    r"authorization|cookie|api[-_]?key|access[-_]?key|token|secret|password", re.I
+)
+
 
 def _resolve(template: str, inputs: Dict) -> str:
     """Substitute {param} placeholders with actual input values."""
@@ -112,6 +119,65 @@ def _parse_response(resp: httpx.Response) -> Any:
         return resp.json()
     except Exception:
         return {"text": resp.text}
+
+
+def _redirect_allowed(src: httpx.URL, dst: httpx.URL) -> bool:
+    """Follow only same-host redirects and http->https upgrades; never downgrade."""
+    if dst.scheme not in ("http", "https"):
+        return False
+    if src.scheme == "https" and dst.scheme != "https":
+        return False
+    if dst.host == src.host:
+        return True
+    return src.scheme == "http" and dst.scheme == "https"
+
+
+def _strip_credentials(request: httpx.Request, secret_values: List[str]) -> None:
+    """Remove credential headers and secret-valued query params in place."""
+    for name in list(request.headers.keys()):
+        value = request.headers[name]
+        if _SENSITIVE_HEADER_RE.search(name) or any(s in value for s in secret_values):
+            del request.headers[name]
+    params = request.url.params
+    kept = [
+        (k, v) for k, v in params.multi_items()
+        if not _SENSITIVE_HEADER_RE.search(k) and v not in secret_values
+    ]
+    if len(kept) != len(params.multi_items()):
+        request.url = request.url.copy_with(params=kept)
+
+
+def _follow_redirects(
+    client: httpx.Client,
+    resp: httpx.Response,
+    secret_values: List[str],
+    log: Callable[[str], None],
+    tool_id: str,
+) -> httpx.Response:
+    """Follow redirects under the policy in _redirect_allowed, at most MAX_REDIRECTS hops.
+
+    Error/log lines name hosts only so a secret in a URL never reaches run logs.
+    """
+    hops = 0
+    while resp.status_code in _REDIRECT_STATUSES:
+        nxt = getattr(resp, "next_request", None)
+        if nxt is None:
+            return resp  # no usable Location; raise_for_status reports it
+        src, dst = resp.request.url, nxt.url
+        where = f"{src.scheme}://{src.host} -> {dst.scheme}://{dst.host}"
+        if hops >= MAX_REDIRECTS:
+            raise RuntimeError(f"[{tool_id}] too many redirects (>{MAX_REDIRECTS}): {where}")
+        if not _redirect_allowed(src, dst):
+            raise RuntimeError(
+                f"[{tool_id}] redirect not followed ({resp.status_code}): {where}; "
+                "only same-host redirects and http->https upgrades are followed"
+            )
+        if dst.host != src.host:
+            _strip_credentials(nxt, secret_values)
+        log(f"[{tool_id}] following {resp.status_code} redirect: {where}")
+        resp = client.send(nxt)
+        hops += 1
+    return resp
 
 
 def make_validate(tool_def: Dict) -> Callable:
@@ -222,6 +288,13 @@ def make_run(tool_def: Dict) -> Callable:
                 resp = client.post(url, json=body_map, params=params, headers=headers)
             else:
                 raise ValueError(f"Unsupported HTTP method: {method}")
+
+            secret_values = [
+                str(resolved[k]) for k in secret_fields if str(resolved.get(k, "")).strip()
+            ]
+            resp = _follow_redirects(
+                client, resp, secret_values, log, tool_def.get("tool_id", "?")
+            )
 
         resp.raise_for_status()
 

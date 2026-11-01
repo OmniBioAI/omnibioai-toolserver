@@ -733,3 +733,122 @@ class TestBodyAlias:
             "query": "query($efoId:String!){disease(efoId:$efoId){id name}}",
             "variables": {"efoId": "EFO_0000305"},
         }
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Redirect policy
+# ═════════════════════════════════════════════════════════════════════════════
+
+class TestRedirects:
+    """Same-host redirects and http->https upgrades are followed (max 5 hops);
+    credentials are stripped when the host changes; anything else fails."""
+
+    @pytest.fixture
+    def log(self):
+        return MagicMock()
+
+    @pytest.fixture
+    def serve(self, monkeypatch):
+        """Route the executor's httpx.Client through a MockTransport.
+
+        `routes` maps "scheme://host/path" -> ("redirect", location, status) or
+        ("ok", json). Every request is recorded in `seen`.
+        """
+        real_client = httpx.Client
+        seen: list = []
+        routes: Dict[str, Any] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            route = routes[f"{request.url.scheme}://{request.url.host}{request.url.path}"]
+            if route[0] == "redirect":
+                return httpx.Response(route[2] if len(route) > 2 else 301, headers={"Location": route[1]})
+            return httpx.Response(200, json=route[1])
+
+        monkeypatch.setattr(
+            httpx, "Client",
+            lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw),
+        )
+        return routes, seen
+
+    def _tool(self, url: str) -> Dict[str, Any]:
+        return {
+            "tool_id": "redir",
+            "inputs_schema": {"properties": {"api_key": {"type": "string", "secret": True}}},
+            "http": {
+                "method": "GET",
+                "url": url,
+                "params": {"apiKey": "{api_key}", "q": "tp53"},
+                "headers": {"ApiKey": "{api_key}", "Accept": "application/json"},
+            },
+        }
+
+    def test_same_host_redirect_followed_with_credentials(self, serve, log):
+        routes, seen = serve
+        routes["https://api.example.org/v1/genes"] = ("redirect", "https://api.example.org/v2/genes")
+        routes["https://api.example.org/v2/genes"] = ("ok", {"v": 2})
+        result = make_run(self._tool("https://api.example.org/v1/genes"))({"api_key": "s3cr3t"}, {}, log)
+        assert result["raw"] == {"v": 2}
+        assert seen[1].headers["ApiKey"] == "s3cr3t"
+
+    def test_http_to_https_same_host_followed(self, serve, log):
+        routes, seen = serve
+        routes["http://api.example.org/genes"] = ("redirect", "https://api.example.org/genes?q=tp53&apiKey=s3cr3t")
+        routes["https://api.example.org/genes"] = ("ok", {"ok": True})
+        result = make_run(self._tool("http://api.example.org/genes"))({"api_key": "s3cr3t"}, {}, log)
+        assert result["raw"] == {"ok": True}
+        assert seen[1].headers["ApiKey"] == "s3cr3t"
+
+    def test_http_to_https_new_host_strips_credentials(self, serve, log):
+        routes, seen = serve
+        routes["http://old.example.org/genes"] = (
+            "redirect", "https://new.example.org/genes?q=tp53&apiKey=s3cr3t", 308)
+        routes["https://new.example.org/genes"] = ("ok", {"ok": True})
+        result = make_run(self._tool("http://old.example.org/genes"))({"api_key": "s3cr3t"}, {}, log)
+        assert result["raw"] == {"ok": True}
+        hop = seen[1]
+        assert "ApiKey" not in hop.headers
+        assert "Authorization" not in hop.headers
+        assert "apiKey" not in hop.url.params
+        assert hop.url.params["q"] == "tp53"
+        assert hop.headers["Accept"] == "application/json"
+        assert all("s3cr3t" not in str(c) for c in log.call_args_list)
+
+    def test_cross_host_https_not_followed(self, serve, log):
+        routes, seen = serve
+        routes["https://api.example.org/genes"] = ("redirect", "https://elsewhere.example.net/genes")
+        with pytest.raises(RuntimeError, match="redirect not followed"):
+            make_run(self._tool("https://api.example.org/genes"))({"api_key": "s3cr3t"}, {}, log)
+        assert len(seen) == 1
+
+    def test_https_to_http_downgrade_not_followed(self, serve, log):
+        routes, seen = serve
+        routes["https://api.example.org/genes"] = ("redirect", "http://api.example.org/genes")
+        with pytest.raises(RuntimeError, match="redirect not followed"):
+            make_run(self._tool("https://api.example.org/genes"))({}, {}, log)
+        assert len(seen) == 1
+
+    def test_five_redirects_followed(self, serve, log):
+        routes, seen = serve
+        for i in range(5):
+            routes[f"https://api.example.org/{i}"] = ("redirect", f"https://api.example.org/{i + 1}")
+        routes["https://api.example.org/5"] = ("ok", {"hops": 5})
+        result = make_run(self._tool("https://api.example.org/0"))({}, {}, log)
+        assert result["raw"] == {"hops": 5}
+        assert len(seen) == 6
+
+    def test_sixth_redirect_fails(self, serve, log):
+        routes, seen = serve
+        for i in range(6):
+            routes[f"https://api.example.org/{i}"] = ("redirect", f"https://api.example.org/{i + 1}")
+        routes["https://api.example.org/6"] = ("ok", {})
+        with pytest.raises(RuntimeError, match="too many redirects"):
+            make_run(self._tool("https://api.example.org/0"))({}, {}, log)
+        assert len(seen) == 6
+
+    def test_error_message_has_no_secret(self, serve, log):
+        routes, _ = serve
+        routes["https://api.example.org/genes"] = ("redirect", "https://evil.example.net/x?apiKey=s3cr3t")
+        with pytest.raises(RuntimeError) as exc:
+            make_run(self._tool("https://api.example.org/genes"))({"api_key": "s3cr3t"}, {}, log)
+        assert "s3cr3t" not in str(exc.value)
