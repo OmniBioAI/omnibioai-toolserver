@@ -852,3 +852,100 @@ class TestRedirects:
         with pytest.raises(RuntimeError) as exc:
             make_run(self._tool("https://api.example.org/genes"))({"api_key": "s3cr3t"}, {}, log)
         assert "s3cr3t" not in str(exc.value)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Response-kind guard (HTML / non-JSON false successes)
+# ═════════════════════════════════════════════════════════════════════════════
+
+@pytest.fixture
+def upstream(monkeypatch):
+    """Serve canned responses through a MockTransport: path -> httpx.Response."""
+    real_client = httpx.Client
+    routes: Dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return routes[request.url.path]()
+
+    monkeypatch.setattr(
+        httpx, "Client", lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw)
+    )
+    return routes
+
+
+HTML = "<!DOCTYPE html><html><body>Welcome</body></html>"
+
+
+class TestResponseKindGuard:
+    """A tool that expects JSON (response_map or Accept: json) fails on a non-JSON
+    body; a text tool (response_map reads only `text`) fails on HTML; tools with
+    no expectation are unchanged. Applies to every response, not just redirects."""
+
+    @pytest.fixture
+    def log(self):
+        return MagicMock()
+
+    def _tool(self, *, rmap=None, accept=None) -> Dict[str, Any]:
+        http: Dict[str, Any] = {
+            "method": "GET", "url": "https://api.example.org/data", "params": {"k": "{key}"},
+        }
+        if accept:
+            http["headers"] = {"Accept": accept}
+        return {
+            "tool_id": "guarded",
+            "inputs_schema": {"properties": {"key": {"type": "string", "secret": True}}},
+            "http": http,
+            "response_map": rmap or {},
+        }
+
+    def test_response_map_tool_fails_on_html_200(self, upstream, log):
+        upstream["/data"] = lambda: httpx.Response(200, text=HTML, headers={"content-type": "text/html"})
+        with pytest.raises(RuntimeError, match=r"expected JSON but got text/html from https://api.example.org"):
+            make_run(self._tool(rmap={"name": "name"}))({}, {}, log)
+
+    def test_accept_json_tool_fails_on_xml(self, upstream, log):
+        upstream["/data"] = lambda: httpx.Response(
+            200, text="<?xml version='1.0'?><a/>", headers={"content-type": "application/xml"})
+        with pytest.raises(RuntimeError, match="expected JSON but got application/xml"):
+            make_run(self._tool(accept="application/json"))({}, {}, log)
+
+    def test_json_body_with_wrong_content_type_passes(self, upstream, log):
+        """The check parses the body; a mislabeled JSON body is accepted."""
+        upstream["/data"] = lambda: httpx.Response(
+            200, text='{"name": "TP53"}', headers={"content-type": "text/plain"})
+        result = make_run(self._tool(rmap={"name": "name"}))({}, {}, log)
+        assert result["name"] == "TP53"
+
+    def test_text_tool_accepts_plain_text(self, upstream, log):
+        upstream["/data"] = lambda: httpx.Response(
+            200, text="hsa:7157\tTP53", headers={"content-type": "text/plain"})
+        result = make_run(self._tool(rmap={"text": "text"}))({}, {}, log)
+        assert result["text"] == "hsa:7157\tTP53"
+
+    def test_text_tool_fails_on_html(self, upstream, log):
+        upstream["/data"] = lambda: httpx.Response(200, text=HTML, headers={"content-type": "text/html"})
+        with pytest.raises(RuntimeError, match="expected a text response but got HTML"):
+            make_run(self._tool(rmap={"text": "text"}))({}, {}, log)
+
+    def test_html_sniffed_without_content_type(self, upstream, log):
+        upstream["/data"] = lambda: httpx.Response(200, text=HTML)
+        with pytest.raises(RuntimeError, match="expected a text response but got HTML"):
+            make_run(self._tool(rmap={"text": "text"}))({}, {}, log)
+
+    def test_tool_without_expectation_unchanged(self, upstream, log):
+        upstream["/data"] = lambda: httpx.Response(200, text=HTML, headers={"content-type": "text/html"})
+        result = make_run(self._tool())({}, {}, log)
+        assert result["raw"] == {"text": HTML}
+
+    def test_redirect_to_landing_page_fails(self, upstream, log):
+        """The case that motivated the guard: an allowed redirect ending on HTML."""
+        upstream["/data"] = lambda: httpx.Response(301, headers={"Location": "https://api.example.org/"})
+        upstream["/"] = lambda: httpx.Response(200, text=HTML, headers={"content-type": "text/html"})
+        with pytest.raises(RuntimeError, match="expected JSON but got text/html"):
+            make_run(self._tool(accept="application/json"))({}, {}, log)
+
+    def test_error_message_has_no_query_secret(self, upstream, log):
+        upstream["/data"] = lambda: httpx.Response(200, text=HTML, headers={"content-type": "text/html"})
+        with pytest.raises(RuntimeError) as exc:
+            make_run(self._tool(rmap={"name": "name"}))({"key": "s3cr3t"}, {}, log)
+        assert "s3cr3t" not in str(exc.value)

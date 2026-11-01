@@ -180,6 +180,65 @@ def _follow_redirects(
     return resp
 
 
+def _expected_kind(tool_def: Dict, headers: Dict[str, str]) -> str:
+    """'json', 'text' or 'any' -- what a successful response must look like.
+
+    A response_map that only reads the {"text": ...} wrapper (KEGG, efetch,
+    ...) declares a plain-text tool; any other response_map, or an Accept
+    header asking for JSON, declares a JSON tool.
+    """
+    rmap = _response_map(tool_def)
+    roots = {re.split(r"[.\[]", str(p or ""))[0] for p in rmap.values()}
+    if rmap and roots <= {"text"}:
+        return "text"
+    accept = next((v for k, v in headers.items() if k.lower() == "accept"), "")
+    if rmap or "json" in str(accept).lower():
+        return "json"
+    return "any"
+
+
+def _is_html(resp: httpx.Response) -> bool:
+    content_type = str(resp.headers.get("content-type") or "").lower()
+    if "html" in content_type:
+        return True
+    head = str(resp.text or "")[:200].lstrip().lower()
+    return head.startswith(("<!doctype html", "<html"))
+
+
+def _check_response_kind(tool_def: Dict, headers: Dict[str, str], resp: httpx.Response) -> None:
+    """Fail instead of 'succeeding' with an HTML page / non-JSON body.
+
+    Landing pages, login walls and error pages often come back as 200; the
+    run must fail rather than complete with {"text": "<html>..."}. Messages
+    name the host only (no query string, which may carry a key).
+    """
+    kind = _expected_kind(tool_def, headers)
+    if kind == "any":
+        return
+    tool_id = tool_def.get("tool_id", "?")
+    content_type = str(resp.headers.get("content-type") or "unknown").split(";")[0]
+    where = f"{resp.request.url.scheme}://{resp.request.url.host}" if _has_request(resp) else "upstream"
+    if kind == "text":
+        if _is_html(resp):
+            raise RuntimeError(
+                f"[{tool_id}] expected a text response but got HTML ({content_type}) from {where}"
+            )
+        return
+    try:
+        resp.json()
+    except Exception:
+        raise RuntimeError(
+            f"[{tool_id}] expected JSON but got {content_type} from {where}"
+        ) from None
+
+
+def _has_request(resp: httpx.Response) -> bool:
+    try:
+        return resp.request is not None
+    except RuntimeError:  # httpx raises if the response has no request
+        return False
+
+
 def make_validate(tool_def: Dict) -> Callable:
     """Return a validate() function bound to this tool_def."""
 
@@ -297,6 +356,7 @@ def make_run(tool_def: Dict) -> Callable:
             )
 
         resp.raise_for_status()
+        _check_response_kind(tool_def, headers, resp)
 
         # ✅ Handle both JSON and plain text responses (e.g. KEGG returns text/plain)
         raw = _parse_response(resp)
