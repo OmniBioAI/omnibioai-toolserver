@@ -591,3 +591,145 @@ class TestMakeRunIntegerParamFallback:
             run({"count": "not-a-number"}, {}, MagicMock())
             _, kwargs = mock_get.call_args
             assert kwargs["params"]["count"] == "not-a-number"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# inputs_schema fallback / http.body alias
+# ═════════════════════════════════════════════════════════════════════════════
+
+SCHEMA_ONLY_TOOL_DEF: Dict[str, Any] = {
+    "tool_id": "vep_region",
+    "inputs_schema": {
+        "type": "object",
+        "properties": {
+            "region": {"type": "string"},
+            "allele": {"type": "string"},
+            "species": {"type": "string", "default": "human"},
+            "page_size": {"type": "integer"},
+            "api_key": {"type": "string", "secret": True},
+        },
+        "required": ["region", "allele"],
+    },
+    "http": {
+        "method": "GET",
+        "url": "https://rest.example.org/vep/{species}/region/{region}/{allele}",
+        "params": {"size": "{page_size}"},
+        "headers": {"ApiKey": "{api_key}"},
+        "timeout": 5,
+    },
+}
+
+
+class TestInputsSchemaFallback:
+    """Tools that only declare inputs_schema (no `inputs` list) still get
+    their placeholders resolved, defaults applied and required fields checked."""
+
+    @pytest.fixture
+    def log(self):
+        return MagicMock()
+
+    def test_schema_placeholders_resolved(self, log):
+        """Path placeholders and schema defaults are filled from inputs_schema."""
+        run = make_run(SCHEMA_ONLY_TOOL_DEF)
+        with patch("httpx.Client.get", return_value=_make_mock_response({})) as mock_get:
+            run({"region": "9:22125503-22125502:1", "allele": "C", "page_size": 5}, {}, log)
+        args, kwargs = mock_get.call_args
+        assert args[0] == "https://rest.example.org/vep/human/region/9:22125503-22125502:1/C"
+        assert kwargs["params"] == {"size": "5"}
+
+    def test_unset_optional_schema_param_dropped(self, log):
+        """An optional schema property with no value is dropped from the query."""
+        run = make_run(SCHEMA_ONLY_TOOL_DEF)
+        with patch("httpx.Client.get", return_value=_make_mock_response({})) as mock_get:
+            run({"region": "1:1-2", "allele": "A"}, {}, log)
+        assert mock_get.call_args.kwargs["params"] == {}
+
+    def test_schema_required_enforced(self):
+        """inputs_schema.required is enforced by validate()."""
+        result = make_validate(SCHEMA_ONLY_TOOL_DEF)({"region": "1:1-2"}, {})
+        assert result["ok"] is False
+        assert [e["field"] for e in result["errors"]] == ["allele"]
+
+    def test_schema_integer_type_checked(self):
+        """inputs_schema integer types are checked like `inputs` integer types."""
+        result = make_validate(SCHEMA_ONLY_TOOL_DEF)(
+            {"region": "1:1-2", "allele": "A", "page_size": "ten"}, {}
+        )
+        assert result["ok"] is False
+
+    def test_inputs_list_wins_over_schema(self):
+        """An `inputs` entry overrides the schema property of the same name."""
+        tool_def = {
+            **SCHEMA_ONLY_TOOL_DEF,
+            "inputs": [{"name": "allele", "type": "string", "required": False, "default": "T"}],
+        }
+        result = make_validate(tool_def)({"region": "1:1-2"}, {})
+        assert result["ok"] is True
+
+    def test_headers_resolved_and_schema_secret_masked(self, log):
+        """Header placeholders are resolved; a schema `secret: true` field is masked in logs."""
+        run = make_run(SCHEMA_ONLY_TOOL_DEF)
+        with patch("httpx.Client.get", return_value=_make_mock_response({})) as mock_get:
+            run({"region": "1:1-2", "allele": "A", "api_key": "s3cr3t"}, {}, log)
+        assert mock_get.call_args.kwargs["headers"] == {"ApiKey": "s3cr3t"}
+        assert all("s3cr3t" not in str(c) for c in log.call_args_list)
+
+
+class TestBodyAlias:
+    """`http.body` is accepted as an alias for `http.body_map`."""
+
+    @pytest.fixture
+    def log(self):
+        return MagicMock()
+
+    def _tool(self, body_type: str) -> Dict[str, Any]:
+        return {
+            "tool_id": "string_enrichment",
+            "inputs_schema": {
+                "properties": {
+                    "identifiers": {"type": "string"},
+                    "species": {"type": "integer", "default": 9606},
+                },
+                "required": ["identifiers"],
+            },
+            "http": {
+                "method": "POST",
+                "url": "https://string.example.org/api/json/enrichment",
+                "body_type": body_type,
+                "body": {"identifiers": "{identifiers}", "species": "{species}"},
+            },
+        }
+
+    def test_form_body_alias_sent(self, log):
+        """A form `body` is substituted and sent as form data."""
+        with patch("httpx.Client.post", return_value=_make_mock_response({})) as mock_post:
+            make_run(self._tool("form"))({"identifiers": "TP53"}, {}, log)
+        assert mock_post.call_args.kwargs["data"] == {"identifiers": "TP53", "species": "9606"}
+
+    def test_body_map_takes_precedence(self, log):
+        """When both are present, body_map is used."""
+        tool_def = self._tool("json")
+        tool_def["http"]["body_map"] = {"ids": "{identifiers}"}
+        with patch("httpx.Client.post", return_value=_make_mock_response({})) as mock_post:
+            make_run(tool_def)({"identifiers": "TP53"}, {}, log)
+        assert mock_post.call_args.kwargs["json"] == {"ids": "TP53"}
+
+    def test_nested_json_body_keeps_structure(self, log):
+        """A nested JSON body (GraphQL variables) stays an object, with placeholders resolved."""
+        tool_def = {
+            "tool_id": "opentargets_disease",
+            "inputs_schema": {"properties": {"efo_id": {"type": "string"}}, "required": ["efo_id"]},
+            "http": {
+                "method": "POST",
+                "url": "https://api.example.org/graphql",
+                "body": {
+                    "query": "query($efoId:String!){disease(efoId:$efoId){id name}}",
+                    "variables": {"efoId": "{efo_id}"},
+                },
+            },
+        }
+        with patch("httpx.Client.post", return_value=_make_mock_response({})) as mock_post:
+            make_run(tool_def)({"efo_id": "EFO_0000305"}, {}, log)
+        assert mock_post.call_args.kwargs["json"] == {
+            "query": "query($efoId:String!){disease(efoId:$efoId){id name}}",
+            "variables": {"efoId": "EFO_0000305"},
+        }

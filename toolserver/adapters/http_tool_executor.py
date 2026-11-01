@@ -48,10 +48,50 @@ def _get_nested(data: Any, path: str) -> Any:
     return data
 
 
+def _resolve_value(value: Any, inputs: Dict) -> Any:
+    """Resolve placeholders inside strings of a (possibly nested) body value.
+
+    Dicts and lists keep their structure so a JSON body such as a GraphQL
+    {"query": ..., "variables": {...}} is sent as an object, not a repr.
+    """
+    if isinstance(value, dict):
+        return {k: _resolve_value(v, inputs) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_resolve_value(v, inputs) for v in value]
+    return _resolve(str(value), inputs)
+
+
 def _input_fields(tool_def: Dict) -> List[Dict]:
-    """Safely get inputs list — handles None and missing key."""
+    """Input fields from the `inputs` list, plus any inputs_schema property
+    the list doesn't declare.
+
+    Most YAML tools only carry `inputs_schema`; without this fallback their
+    {placeholders} were never substituted and required fields never checked.
+    An explicit `inputs` entry wins over the schema for the same name.
+    """
     fields = tool_def.get("inputs") or []
-    return fields if isinstance(fields, list) else []
+    fields = [f for f in fields if isinstance(f, dict)] if isinstance(fields, list) else []
+    schema = tool_def.get("inputs_schema") or {}
+    props = schema.get("properties") if isinstance(schema, dict) else None
+    if not isinstance(props, dict):
+        return fields
+    declared = {f.get("name") for f in fields}
+    required = set(schema.get("required") or [])
+    for name, prop in props.items():
+        if name in declared:
+            continue
+        prop = prop if isinstance(prop, dict) else {}
+        field: Dict[str, Any] = {
+            "name": name,
+            "type": prop.get("type", "string"),
+            "required": name in required,
+        }
+        if "default" in prop:
+            field["default"] = prop["default"]
+        if prop.get("secret"):
+            field["secret"] = True
+        fields.append(field)
+    return fields
 
 
 def _response_map(tool_def: Dict) -> Dict:
@@ -149,14 +189,17 @@ def make_run(tool_def: Dict) -> Callable:
         # Skip empty string params — avoids ?synonym= polluting URLs
         params = {k: v for k, v in params.items() if v != ""}
 
-        # Headers
-        headers = dict(http_cfg.get("headers") or {})
+        # Headers (may carry secret inputs, e.g. an API key header)
+        headers = {
+            k: _resolve(str(v), resolved)
+            for k, v in (http_cfg.get("headers") or {}).items()
+        }
 
-        # Body (POST only)
+        # Body (POST only) — `body` is accepted as an alias for `body_map`
         body_type = http_cfg.get("body_type", "json")
         body_map: Dict[str, Any] = {
-            k: _resolve(str(v), resolved)
-            for k, v in (http_cfg.get("body_map") or {}).items()
+            k: _resolve_value(v, resolved)
+            for k, v in (http_cfg.get("body_map") or http_cfg.get("body") or {}).items()
         }
 
         # Log — mask secret fields
