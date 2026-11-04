@@ -28,10 +28,16 @@ jobs:
           cache: pip
 
       - name: Install dependencies
+        env:
+          IAM_TOKEN: ${{ secrets.IAM_CLIENT_READ_TOKEN }}
         run: |
+          set -euo pipefail
+          test -n "$IAM_TOKEN"
           python -m pip install --upgrade pip
+          git config --global url."https://x-access-token:${IAM_TOKEN}@github.com/".insteadOf "https://github.com/"
+          trap 'git config --global --unset-all url."https://x-access-token:${IAM_TOKEN}@github.com/".insteadOf || true' EXIT
           if [ -f pyproject.toml ]; then
-            pip install -e ".[dev]" 2>/dev/null || pip install -e .
+            pip install -e ".[dev]"
           elif [ -f requirements.txt ]; then
             pip install -r requirements.txt
           fi
