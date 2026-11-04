@@ -14,16 +14,22 @@ Developer:
 
 from __future__ import annotations
 
-import pytest
-import httpx
-from unittest.mock import MagicMock, patch, call
 from typing import Any, Dict
+from unittest.mock import MagicMock, patch
+
+import httpx
+import pytest
 
 # ── Import the module under test ──────────────────────────────────────────────
 # Adjust the import path to match your project structure, e.g.:
 # from toolserver.tool_runner import _resolve, _get_nested, make_validate, make_run
-from toolserver.adapters.http_tool_executor import _resolve, _get_nested, _parse_response, make_validate, make_run
-
+from toolserver.adapters.http_tool_executor import (
+    _get_nested,
+    _parse_response,
+    _resolve,
+    make_run,
+    make_validate,
+)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # _resolve

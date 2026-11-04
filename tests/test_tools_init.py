@@ -12,15 +12,13 @@ Developer:
 
 from __future__ import annotations
 
-import textwrap
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 import yaml
 
 from toolserver.tools import load_tools_from_yaml, register_tools
-
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Helpers

@@ -9,11 +9,11 @@ Author:
 """
 
 from __future__ import annotations
-import re
-import xml.etree.ElementTree as ET
-from typing import Any, Callable, Dict, List, Optional
-import httpx
 
+import xml.etree.ElementTree as ET
+from typing import Any, Callable, Dict, List
+
+import httpx
 
 DAVID_WS = "https://davidbioinformatics.nih.gov/webservice/services/DAVIDWebService"
 NS = "http://service.session.sample"
@@ -60,7 +60,7 @@ def _parse_chart_records(xml_text: str) -> List[Dict[str, Any]]:
                     record[tag] = child.text
                 if record:
                     results.append(record)
-    except Exception as e:
+    except Exception:
         pass
     return results
 

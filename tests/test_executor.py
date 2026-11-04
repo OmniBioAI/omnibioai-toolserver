@@ -329,7 +329,7 @@ class TestSubmitFailurePath:
         assert final.updated_epoch >= original
 
     def test_non_runtime_exception_still_fails(self, tmp_path):
-        """Non-RuntimeError exceptions (e.g. KeyError) from the handler also fail the run rather than propagating or being swallowed."""
+        """Non-RuntimeError handler exceptions also fail the run."""
         ex, store, rec = self._failing_executor(tmp_path, KeyError("missing key"))
         ex.submit(rec, {}, {})
         final = _wait_for_state(store, rec.run_id, "FAILED")
@@ -346,7 +346,7 @@ class TestSubmitRegistryLookup:
     starts."""
 
     def test_uses_handler_for_correct_tool_id(self, tmp_path):
-        """submit() dispatches to the handler registered under the run's own tool_id, not any other registered handler."""
+        """submit() dispatches to the run's registered tool_id handler."""
         called_with: list = []
         def run_fn(inputs, resources, log):
             called_with.append(inputs)
@@ -364,7 +364,7 @@ class TestSubmitRegistryLookup:
         assert called_with == [{"x": 1}]
 
     def test_unregistered_tool_raises_at_submit_time(self, tmp_store):
-        """submit() raises KeyError naming the tool_id immediately when no handler is registered for it, rather than failing the run asynchronously."""
+        """submit() immediately names an unregistered tool in KeyError."""
         reg = ToolRegistry()  # empty — nothing registered
         ex = Executor(store=tmp_store, registry=reg)
         rec = _make_record(tool_id="ghost_tool")
@@ -426,7 +426,7 @@ class TestConcurrency:
     independent jobs."""
 
     def test_multiple_jobs_all_complete(self, tmp_path):
-        """Submitting many runs to a multi-worker executor lets them all complete independently and concurrently."""
+        """Many runs complete independently on a multi-worker executor."""
         n = 10
         store = _make_store(tmp_path)
         records = [_make_record(run_id=f"run-{i}") for i in range(n)]
@@ -446,7 +446,7 @@ class TestConcurrency:
             assert store.get(r.run_id).state == "COMPLETED"
 
     def test_failed_job_does_not_affect_others(self, tmp_path):
-        """One submitted run failing does not prevent a concurrently submitted, unrelated run from completing successfully."""
+        """One failed run does not prevent another from completing."""
         store = _make_store(tmp_path)
         good_rec = _make_record(run_id="good")
         bad_rec = _make_record(run_id="bad")

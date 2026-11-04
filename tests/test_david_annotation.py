@@ -20,7 +20,6 @@ import pytest
 
 from toolserver.tools.david_annotation import _parse_chart_records, _run, _soap, _validate
 
-
 # ═════════════════════════════════════════════════════════════════════════════
 # _validate
 # ═════════════════════════════════════════════════════════════════════════════
