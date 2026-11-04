@@ -15,6 +15,13 @@ from typing import Any, Callable, Dict, List
 
 import httpx
 
+MAX_REDIRECTS = 5
+_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+# Header names that carry credentials; dropped when a redirect changes host.
+_SENSITIVE_HEADER_RE = re.compile(
+    r"authorization|cookie|api[-_]?key|access[-_]?key|token|secret|password", re.I
+)
+
 
 def _resolve(template: str, inputs: Dict) -> str:
     """Substitute {param} placeholders with actual input values."""
@@ -48,10 +55,50 @@ def _get_nested(data: Any, path: str) -> Any:
     return data
 
 
+def _resolve_value(value: Any, inputs: Dict) -> Any:
+    """Resolve placeholders inside strings of a (possibly nested) body value.
+
+    Dicts and lists keep their structure so a JSON body such as a GraphQL
+    {"query": ..., "variables": {...}} is sent as an object, not a repr.
+    """
+    if isinstance(value, dict):
+        return {k: _resolve_value(v, inputs) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_resolve_value(v, inputs) for v in value]
+    return _resolve(str(value), inputs)
+
+
 def _input_fields(tool_def: Dict) -> List[Dict]:
-    """Safely get inputs list — handles None and missing key."""
+    """Input fields from the `inputs` list, plus any inputs_schema property
+    the list doesn't declare.
+
+    Most YAML tools only carry `inputs_schema`; without this fallback their
+    {placeholders} were never substituted and required fields never checked.
+    An explicit `inputs` entry wins over the schema for the same name.
+    """
     fields = tool_def.get("inputs") or []
-    return fields if isinstance(fields, list) else []
+    fields = [f for f in fields if isinstance(f, dict)] if isinstance(fields, list) else []
+    schema = tool_def.get("inputs_schema") or {}
+    props = schema.get("properties") if isinstance(schema, dict) else None
+    if not isinstance(props, dict):
+        return fields
+    declared = {f.get("name") for f in fields}
+    required = set(schema.get("required") or [])
+    for name, prop in props.items():
+        if name in declared:
+            continue
+        prop = prop if isinstance(prop, dict) else {}
+        field: Dict[str, Any] = {
+            "name": name,
+            "type": prop.get("type", "string"),
+            "required": name in required,
+        }
+        if "default" in prop:
+            field["default"] = prop["default"]
+        if prop.get("secret"):
+            field["secret"] = True
+        fields.append(field)
+    return fields
 
 
 def _response_map(tool_def: Dict) -> Dict:
@@ -72,6 +119,124 @@ def _parse_response(resp: httpx.Response) -> Any:
         return resp.json()
     except Exception:
         return {"text": resp.text}
+
+
+def _redirect_allowed(src: httpx.URL, dst: httpx.URL) -> bool:
+    """Follow only same-host redirects and http->https upgrades; never downgrade."""
+    if dst.scheme not in ("http", "https"):
+        return False
+    if src.scheme == "https" and dst.scheme != "https":
+        return False
+    if dst.host == src.host:
+        return True
+    return src.scheme == "http" and dst.scheme == "https"
+
+
+def _strip_credentials(request: httpx.Request, secret_values: List[str]) -> None:
+    """Remove credential headers and secret-valued query params in place."""
+    for name in list(request.headers.keys()):
+        value = request.headers[name]
+        if _SENSITIVE_HEADER_RE.search(name) or any(s in value for s in secret_values):
+            del request.headers[name]
+    params = request.url.params
+    kept = [
+        (k, v) for k, v in params.multi_items()
+        if not _SENSITIVE_HEADER_RE.search(k) and v not in secret_values
+    ]
+    if len(kept) != len(params.multi_items()):
+        request.url = request.url.copy_with(params=kept)
+
+
+def _follow_redirects(
+    client: httpx.Client,
+    resp: httpx.Response,
+    secret_values: List[str],
+    log: Callable[[str], None],
+    tool_id: str,
+) -> httpx.Response:
+    """Follow redirects under the policy in _redirect_allowed, at most MAX_REDIRECTS hops.
+
+    Error/log lines name hosts only so a secret in a URL never reaches run logs.
+    """
+    hops = 0
+    while resp.status_code in _REDIRECT_STATUSES:
+        nxt = getattr(resp, "next_request", None)
+        if nxt is None:
+            return resp  # no usable Location; raise_for_status reports it
+        src, dst = resp.request.url, nxt.url
+        where = f"{src.scheme}://{src.host} -> {dst.scheme}://{dst.host}"
+        if hops >= MAX_REDIRECTS:
+            raise RuntimeError(f"[{tool_id}] too many redirects (>{MAX_REDIRECTS}): {where}")
+        if not _redirect_allowed(src, dst):
+            raise RuntimeError(
+                f"[{tool_id}] redirect not followed ({resp.status_code}): {where}; "
+                "only same-host redirects and http->https upgrades are followed"
+            )
+        if dst.host != src.host:
+            _strip_credentials(nxt, secret_values)
+        log(f"[{tool_id}] following {resp.status_code} redirect: {where}")
+        resp = client.send(nxt)
+        hops += 1
+    return resp
+
+
+def _expected_kind(tool_def: Dict, headers: Dict[str, str]) -> str:
+    """'json', 'text' or 'any' -- what a successful response must look like.
+
+    A response_map that only reads the {"text": ...} wrapper (KEGG, efetch,
+    ...) declares a plain-text tool; any other response_map, or an Accept
+    header asking for JSON, declares a JSON tool.
+    """
+    rmap = _response_map(tool_def)
+    roots = {re.split(r"[.\[]", str(p or ""))[0] for p in rmap.values()}
+    if rmap and roots <= {"text"}:
+        return "text"
+    accept = next((v for k, v in headers.items() if k.lower() == "accept"), "")
+    if rmap or "json" in str(accept).lower():
+        return "json"
+    return "any"
+
+
+def _is_html(resp: httpx.Response) -> bool:
+    content_type = str(resp.headers.get("content-type") or "").lower()
+    if "html" in content_type:
+        return True
+    head = str(resp.text or "")[:200].lstrip().lower()
+    return head.startswith(("<!doctype html", "<html"))
+
+
+def _check_response_kind(tool_def: Dict, headers: Dict[str, str], resp: httpx.Response) -> None:
+    """Fail instead of 'succeeding' with an HTML page / non-JSON body.
+
+    Landing pages, login walls and error pages often come back as 200; the
+    run must fail rather than complete with {"text": "<html>..."}. Messages
+    name the host only (no query string, which may carry a key).
+    """
+    kind = _expected_kind(tool_def, headers)
+    if kind == "any":
+        return
+    tool_id = tool_def.get("tool_id", "?")
+    content_type = str(resp.headers.get("content-type") or "unknown").split(";")[0]
+    where = f"{resp.request.url.scheme}://{resp.request.url.host}" if _has_request(resp) else "upstream"
+    if kind == "text":
+        if _is_html(resp):
+            raise RuntimeError(
+                f"[{tool_id}] expected a text response but got HTML ({content_type}) from {where}"
+            )
+        return
+    try:
+        resp.json()
+    except Exception:
+        raise RuntimeError(
+            f"[{tool_id}] expected JSON but got {content_type} from {where}"
+        ) from None
+
+
+def _has_request(resp: httpx.Response) -> bool:
+    try:
+        return resp.request is not None
+    except RuntimeError:  # httpx raises if the response has no request
+        return False
 
 
 def make_validate(tool_def: Dict) -> Callable:
@@ -149,14 +314,17 @@ def make_run(tool_def: Dict) -> Callable:
         # Skip empty string params — avoids ?synonym= polluting URLs
         params = {k: v for k, v in params.items() if v != ""}
 
-        # Headers
-        headers = dict(http_cfg.get("headers") or {})
+        # Headers (may carry secret inputs, e.g. an API key header)
+        headers = {
+            k: _resolve(str(v), resolved)
+            for k, v in (http_cfg.get("headers") or {}).items()
+        }
 
-        # Body (POST only)
+        # Body (POST only) — `body` is accepted as an alias for `body_map`
         body_type = http_cfg.get("body_type", "json")
         body_map: Dict[str, Any] = {
-            k: _resolve(str(v), resolved)
-            for k, v in (http_cfg.get("body_map") or {}).items()
+            k: _resolve_value(v, resolved)
+            for k, v in (http_cfg.get("body_map") or http_cfg.get("body") or {}).items()
         }
 
         # Log — mask secret fields
@@ -180,7 +348,15 @@ def make_run(tool_def: Dict) -> Callable:
             else:
                 raise ValueError(f"Unsupported HTTP method: {method}")
 
+            secret_values = [
+                str(resolved[k]) for k in secret_fields if str(resolved.get(k, "")).strip()
+            ]
+            resp = _follow_redirects(
+                client, resp, secret_values, log, tool_def.get("tool_id", "?")
+            )
+
         resp.raise_for_status()
+        _check_response_kind(tool_def, headers, resp)
 
         # ✅ Handle both JSON and plain text responses (e.g. KEGG returns text/plain)
         raw = _parse_response(resp)

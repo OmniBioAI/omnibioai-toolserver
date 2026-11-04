@@ -6,11 +6,11 @@ Coverage-focused tests for toolserver_app.py's app-creation branches
 Developer:
     Manish Kumar <manish@omnibioai.org>
 """
-import pytest
+import os
+from unittest.mock import patch
+
 import yaml
 from fastapi.testclient import TestClient
-from unittest.mock import patch
-import os
 
 
 # ── helper ──────────────────────────────────────────────────────────────────
@@ -25,7 +25,7 @@ def get_client(tools_yaml_exists=False):
 # ── Line 42: YAML not found warning ─────────────────────────────────────────
 def test_create_app_yaml_not_found(capsys):
     """Covers the else branch (line 42) when tools YAML is missing."""
-    client = get_client(tools_yaml_exists=False)
+    get_client(tools_yaml_exists=False)
     captured = capsys.readouterr()
     assert "WARNING" in captured.out
     assert "only legacy tools loaded" in captured.out

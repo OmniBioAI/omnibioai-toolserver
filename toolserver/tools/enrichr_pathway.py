@@ -2,7 +2,8 @@
 OmniBioAI toolserver.tools.enrichr_pathway.
 
 Purpose:
-    Defines _validate, _row_to_item, _normalize_enrichr_payload and _sort_and_top for toolserver.tools.enrichr_pathway.
+    Defines validation, normalization, sorting and result selection for
+    toolserver.tools.enrichr_pathway.
 
 Author:
     Manish Kumar <manish@omnibioai.org>

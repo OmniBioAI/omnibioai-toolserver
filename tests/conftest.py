@@ -52,14 +52,14 @@ FAKE_READ_IDENTITY = DelegatedExecutionIdentity(
 
 
 def _authorize(app) -> None:
-    """Override the delegated-execution dependencies with fixed, already-authorized fake identities so callers skip real Auth/IAM."""
+    """Use fixed, authorized identities so tests skip real Auth/IAM."""
     app.dependency_overrides[require_workflow_execute] = lambda: FAKE_EXECUTE_IDENTITY
     app.dependency_overrides[require_runs_read] = lambda: FAKE_READ_IDENTITY
 
 
 @pytest.fixture()
 def client(monkeypatch, tmp_path):
-    """Build a TestClient with an isolated run-store directory, a network-free patched tool runner, and fake authorization already applied."""
+    """Build an isolated, network-free, already-authorized TestClient."""
     # Ensure RunStore writes into temp
     monkeypatch.setenv("TOOLSERVER_RUN_STORE_DIR", str(tmp_path / "runs"))
 

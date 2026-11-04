@@ -19,8 +19,9 @@ import yaml
 
 from ..adapters.http_tool_executor import make_run, make_validate
 from ..registry import ToolHandler
+from .david_annotation import _run as _david_run
+from .david_annotation import _validate as _david_validate
 from .enrichr_pathway import _run, _validate
-from .david_annotation import _run as _david_run, _validate as _david_validate
 
 
 def register_tools(registry) -> None:
