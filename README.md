@@ -11,6 +11,8 @@ It is designed to run **independently** and be registered as a remote execution 
 
 ---
 
+![OmniBioAI ToolServer Architecture](docs/architecture/omnibioai-toolserver-architecture.png)
+
 ## Implemented API Contract
 
 The ToolServer exposes the following endpoints:
