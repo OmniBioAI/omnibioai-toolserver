@@ -1,8 +1,5 @@
 [build-system]
-# setup.py imports Cython while setuptools evaluates the editable build.
-# Declaring it here makes it available inside pip's isolated build env rather
-# than relying on a runner-global preinstall.
-requires = ["setuptools>=68", "wheel", "Cython>=3,<4"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
