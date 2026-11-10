@@ -55,7 +55,7 @@ def test_create_run_validation_fails(client):
 
 
 def test_create_run_and_poll_to_complete(client):
-    """Drive a valid run from creation through COMPLETED state, with logs and results populated along the way."""
+    """Drive a valid run through COMPLETED with logs and results."""
     req = {
         "tool_id": "enrichr_pathway",
         "inputs": {"genes": ["TP53", "BRCA1"], "top_n": 10},

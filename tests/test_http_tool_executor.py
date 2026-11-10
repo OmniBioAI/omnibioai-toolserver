@@ -14,16 +14,22 @@ Developer:
 
 from __future__ import annotations
 
-import pytest
-import httpx
-from unittest.mock import MagicMock, patch, call
 from typing import Any, Dict
+from unittest.mock import MagicMock, patch
+
+import httpx
+import pytest
 
 # ── Import the module under test ──────────────────────────────────────────────
 # Adjust the import path to match your project structure, e.g.:
 # from toolserver.tool_runner import _resolve, _get_nested, make_validate, make_run
-from toolserver.adapters.http_tool_executor import _resolve, _get_nested, _parse_response, make_validate, make_run
-
+from toolserver.adapters.http_tool_executor import (
+    _get_nested,
+    _parse_response,
+    _resolve,
+    make_run,
+    make_validate,
+)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # _resolve
@@ -320,8 +326,9 @@ class TestMakeRunGet:
 
         with patch("httpx.Client.get", return_value=mock_resp) as mock_get:
             run({"query": "MYC"}, {}, log)   # limit not provided → default 10
-            _, kwargs = mock_get.call_args
-            assert kwargs["params"]["limit"] == 10
+            # Params are folded into the URL itself (see _merge_query).
+            assert httpx.URL(mock_get.call_args[0][0]).params["limit"] == "10"
+            assert "params" not in mock_get.call_args.kwargs
 
     def test_log_called_twice(self, run, log):
         """A successful run logs exactly twice: once for the outgoing
@@ -589,5 +596,460 @@ class TestMakeRunIntegerParamFallback:
 
         with patch("httpx.Client.get", return_value=mock_resp) as mock_get:
             run({"count": "not-a-number"}, {}, MagicMock())
-            _, kwargs = mock_get.call_args
-            assert kwargs["params"]["count"] == "not-a-number"
+            assert httpx.URL(mock_get.call_args[0][0]).params["count"] == "not-a-number"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# inputs_schema fallback / http.body alias
+# ═════════════════════════════════════════════════════════════════════════════
+
+SCHEMA_ONLY_TOOL_DEF: Dict[str, Any] = {
+    "tool_id": "vep_region",
+    "inputs_schema": {
+        "type": "object",
+        "properties": {
+            "region": {"type": "string"},
+            "allele": {"type": "string"},
+            "species": {"type": "string", "default": "human"},
+            "page_size": {"type": "integer"},
+            "api_key": {"type": "string", "secret": True},
+        },
+        "required": ["region", "allele"],
+    },
+    "http": {
+        "method": "GET",
+        "url": "https://rest.example.org/vep/{species}/region/{region}/{allele}",
+        "params": {"size": "{page_size}"},
+        "headers": {"ApiKey": "{api_key}"},
+        "timeout": 5,
+    },
+}
+
+
+class TestInputsSchemaFallback:
+    """Tools that only declare inputs_schema (no `inputs` list) still get
+    their placeholders resolved, defaults applied and required fields checked."""
+
+    @pytest.fixture
+    def log(self):
+        return MagicMock()
+
+    def test_schema_placeholders_resolved(self, log):
+        """Path placeholders and schema defaults are filled from inputs_schema."""
+        run = make_run(SCHEMA_ONLY_TOOL_DEF)
+        with patch("httpx.Client.get", return_value=_make_mock_response({})) as mock_get:
+            run({"region": "9:22125503-22125502:1", "allele": "C", "page_size": 5}, {}, log)
+        args, kwargs = mock_get.call_args
+        assert args[0] == "https://rest.example.org/vep/human/region/9:22125503-22125502:1/C?size=5"
+        assert "params" not in kwargs
+
+    def test_unset_optional_schema_param_dropped(self, log):
+        """An optional schema property with no value is dropped from the query."""
+        run = make_run(SCHEMA_ONLY_TOOL_DEF)
+        with patch("httpx.Client.get", return_value=_make_mock_response({})) as mock_get:
+            run({"region": "1:1-2", "allele": "A"}, {}, log)
+        assert mock_get.call_args[0][0] == "https://rest.example.org/vep/human/region/1:1-2/A"
+
+    def test_schema_required_enforced(self):
+        """inputs_schema.required is enforced by validate()."""
+        result = make_validate(SCHEMA_ONLY_TOOL_DEF)({"region": "1:1-2"}, {})
+        assert result["ok"] is False
+        assert [e["field"] for e in result["errors"]] == ["allele"]
+
+    def test_schema_integer_type_checked(self):
+        """inputs_schema integer types are checked like `inputs` integer types."""
+        result = make_validate(SCHEMA_ONLY_TOOL_DEF)(
+            {"region": "1:1-2", "allele": "A", "page_size": "ten"}, {}
+        )
+        assert result["ok"] is False
+
+    def test_inputs_list_wins_over_schema(self):
+        """An `inputs` entry overrides the schema property of the same name."""
+        tool_def = {
+            **SCHEMA_ONLY_TOOL_DEF,
+            "inputs": [{"name": "allele", "type": "string", "required": False, "default": "T"}],
+        }
+        result = make_validate(tool_def)({"region": "1:1-2"}, {})
+        assert result["ok"] is True
+
+    def test_headers_resolved_and_schema_secret_masked(self, log):
+        """Header placeholders are resolved; a schema `secret: true` field is masked in logs."""
+        run = make_run(SCHEMA_ONLY_TOOL_DEF)
+        with patch("httpx.Client.get", return_value=_make_mock_response({})) as mock_get:
+            run({"region": "1:1-2", "allele": "A", "api_key": "s3cr3t"}, {}, log)
+        assert mock_get.call_args.kwargs["headers"] == {"ApiKey": "s3cr3t"}
+        assert all("s3cr3t" not in str(c) for c in log.call_args_list)
+
+
+class TestBodyAlias:
+    """`http.body` is accepted as an alias for `http.body_map`."""
+
+    @pytest.fixture
+    def log(self):
+        return MagicMock()
+
+    def _tool(self, body_type: str) -> Dict[str, Any]:
+        return {
+            "tool_id": "string_enrichment",
+            "inputs_schema": {
+                "properties": {
+                    "identifiers": {"type": "string"},
+                    "species": {"type": "integer", "default": 9606},
+                },
+                "required": ["identifiers"],
+            },
+            "http": {
+                "method": "POST",
+                "url": "https://string.example.org/api/json/enrichment",
+                "body_type": body_type,
+                "body": {"identifiers": "{identifiers}", "species": "{species}"},
+            },
+        }
+
+    def test_form_body_alias_sent(self, log):
+        """A form `body` is substituted and sent as form data."""
+        with patch("httpx.Client.post", return_value=_make_mock_response({})) as mock_post:
+            make_run(self._tool("form"))({"identifiers": "TP53"}, {}, log)
+        assert mock_post.call_args.kwargs["data"] == {"identifiers": "TP53", "species": "9606"}
+
+    def test_body_map_takes_precedence(self, log):
+        """When both are present, body_map is used."""
+        tool_def = self._tool("json")
+        tool_def["http"]["body_map"] = {"ids": "{identifiers}"}
+        with patch("httpx.Client.post", return_value=_make_mock_response({})) as mock_post:
+            make_run(tool_def)({"identifiers": "TP53"}, {}, log)
+        assert mock_post.call_args.kwargs["json"] == {"ids": "TP53"}
+
+    def test_nested_json_body_keeps_structure(self, log):
+        """A nested JSON body (GraphQL variables) stays an object, with placeholders resolved."""
+        tool_def = {
+            "tool_id": "opentargets_disease",
+            "inputs_schema": {"properties": {"efo_id": {"type": "string"}}, "required": ["efo_id"]},
+            "http": {
+                "method": "POST",
+                "url": "https://api.example.org/graphql",
+                "body": {
+                    "query": "query($efoId:String!){disease(efoId:$efoId){id name}}",
+                    "variables": {"efoId": "{efo_id}"},
+                },
+            },
+        }
+        with patch("httpx.Client.post", return_value=_make_mock_response({})) as mock_post:
+            make_run(tool_def)({"efo_id": "EFO_0000305"}, {}, log)
+        assert mock_post.call_args.kwargs["json"] == {
+            "query": "query($efoId:String!){disease(efoId:$efoId){id name}}",
+            "variables": {"efoId": "EFO_0000305"},
+        }
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Redirect policy
+# ═════════════════════════════════════════════════════════════════════════════
+
+class TestRedirects:
+    """Same-host redirects and http->https upgrades are followed (max 5 hops);
+    credentials are stripped when the host changes; anything else fails."""
+
+    @pytest.fixture
+    def log(self):
+        return MagicMock()
+
+    @pytest.fixture
+    def serve(self, monkeypatch):
+        """Route the executor's httpx.Client through a MockTransport.
+
+        `routes` maps "scheme://host/path" -> ("redirect", location, status) or
+        ("ok", json). Every request is recorded in `seen`.
+        """
+        real_client = httpx.Client
+        seen: list = []
+        routes: Dict[str, Any] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            route = routes[f"{request.url.scheme}://{request.url.host}{request.url.path}"]
+            if route[0] == "redirect":
+                return httpx.Response(route[2] if len(route) > 2 else 301, headers={"Location": route[1]})
+            return httpx.Response(200, json=route[1])
+
+        monkeypatch.setattr(
+            httpx, "Client",
+            lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw),
+        )
+        return routes, seen
+
+    def _tool(self, url: str) -> Dict[str, Any]:
+        return {
+            "tool_id": "redir",
+            "inputs_schema": {"properties": {"api_key": {"type": "string", "secret": True}}},
+            "http": {
+                "method": "GET",
+                "url": url,
+                "params": {"apiKey": "{api_key}", "q": "tp53"},
+                "headers": {"ApiKey": "{api_key}", "Accept": "application/json"},
+            },
+        }
+
+    def test_same_host_redirect_followed_with_credentials(self, serve, log):
+        routes, seen = serve
+        routes["https://api.example.org/v1/genes"] = ("redirect", "https://api.example.org/v2/genes")
+        routes["https://api.example.org/v2/genes"] = ("ok", {"v": 2})
+        result = make_run(self._tool("https://api.example.org/v1/genes"))({"api_key": "s3cr3t"}, {}, log)
+        assert result["raw"] == {"v": 2}
+        assert seen[1].headers["ApiKey"] == "s3cr3t"
+
+    def test_http_to_https_same_host_followed(self, serve, log):
+        routes, seen = serve
+        routes["http://api.example.org/genes"] = ("redirect", "https://api.example.org/genes?q=tp53&apiKey=s3cr3t")
+        routes["https://api.example.org/genes"] = ("ok", {"ok": True})
+        result = make_run(self._tool("http://api.example.org/genes"))({"api_key": "s3cr3t"}, {}, log)
+        assert result["raw"] == {"ok": True}
+        assert seen[1].headers["ApiKey"] == "s3cr3t"
+
+    def test_http_to_https_new_host_strips_credentials(self, serve, log):
+        routes, seen = serve
+        routes["http://old.example.org/genes"] = (
+            "redirect", "https://new.example.org/genes?q=tp53&apiKey=s3cr3t", 308)
+        routes["https://new.example.org/genes"] = ("ok", {"ok": True})
+        result = make_run(self._tool("http://old.example.org/genes"))({"api_key": "s3cr3t"}, {}, log)
+        assert result["raw"] == {"ok": True}
+        hop = seen[1]
+        assert "ApiKey" not in hop.headers
+        assert "Authorization" not in hop.headers
+        assert "apiKey" not in hop.url.params
+        assert hop.url.params["q"] == "tp53"
+        assert hop.headers["Accept"] == "application/json"
+        assert all("s3cr3t" not in str(c) for c in log.call_args_list)
+
+    def test_cross_host_https_not_followed(self, serve, log):
+        routes, seen = serve
+        routes["https://api.example.org/genes"] = ("redirect", "https://elsewhere.example.net/genes")
+        with pytest.raises(RuntimeError, match="redirect not followed"):
+            make_run(self._tool("https://api.example.org/genes"))({"api_key": "s3cr3t"}, {}, log)
+        assert len(seen) == 1
+
+    def test_https_to_http_downgrade_not_followed(self, serve, log):
+        routes, seen = serve
+        routes["https://api.example.org/genes"] = ("redirect", "http://api.example.org/genes")
+        with pytest.raises(RuntimeError, match="redirect not followed"):
+            make_run(self._tool("https://api.example.org/genes"))({}, {}, log)
+        assert len(seen) == 1
+
+    def test_five_redirects_followed(self, serve, log):
+        routes, seen = serve
+        for i in range(5):
+            routes[f"https://api.example.org/{i}"] = ("redirect", f"https://api.example.org/{i + 1}")
+        routes["https://api.example.org/5"] = ("ok", {"hops": 5})
+        result = make_run(self._tool("https://api.example.org/0"))({}, {}, log)
+        assert result["raw"] == {"hops": 5}
+        assert len(seen) == 6
+
+    def test_sixth_redirect_fails(self, serve, log):
+        routes, seen = serve
+        for i in range(6):
+            routes[f"https://api.example.org/{i}"] = ("redirect", f"https://api.example.org/{i + 1}")
+        routes["https://api.example.org/6"] = ("ok", {})
+        with pytest.raises(RuntimeError, match="too many redirects"):
+            make_run(self._tool("https://api.example.org/0"))({}, {}, log)
+        assert len(seen) == 6
+
+    def test_error_message_has_no_secret(self, serve, log):
+        routes, _ = serve
+        routes["https://api.example.org/genes"] = ("redirect", "https://evil.example.net/x?apiKey=s3cr3t")
+        with pytest.raises(RuntimeError) as exc:
+            make_run(self._tool("https://api.example.org/genes"))({"api_key": "s3cr3t"}, {}, log)
+        assert "s3cr3t" not in str(exc.value)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Response-kind guard (HTML / non-JSON false successes)
+# ═════════════════════════════════════════════════════════════════════════════
+
+@pytest.fixture
+def upstream(monkeypatch):
+    """Serve canned responses through a MockTransport: path -> httpx.Response."""
+    real_client = httpx.Client
+    routes: Dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return routes[request.url.path]()
+
+    monkeypatch.setattr(
+        httpx, "Client", lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw)
+    )
+    return routes
+
+
+HTML = "<!DOCTYPE html><html><body>Welcome</body></html>"
+
+
+class TestResponseKindGuard:
+    """A tool that expects JSON (response_map or Accept: json) fails on a non-JSON
+    body; a text tool (response_map reads only `text`) fails on HTML; tools with
+    no expectation are unchanged. Applies to every response, not just redirects."""
+
+    @pytest.fixture
+    def log(self):
+        return MagicMock()
+
+    def _tool(self, *, rmap=None, accept=None) -> Dict[str, Any]:
+        http: Dict[str, Any] = {
+            "method": "GET", "url": "https://api.example.org/data", "params": {"k": "{key}"},
+        }
+        if accept:
+            http["headers"] = {"Accept": accept}
+        return {
+            "tool_id": "guarded",
+            "inputs_schema": {"properties": {"key": {"type": "string", "secret": True}}},
+            "http": http,
+            "response_map": rmap or {},
+        }
+
+    def test_response_map_tool_fails_on_html_200(self, upstream, log):
+        upstream["/data"] = lambda: httpx.Response(200, text=HTML, headers={"content-type": "text/html"})
+        with pytest.raises(RuntimeError, match=r"expected JSON but got text/html from https://api.example.org"):
+            make_run(self._tool(rmap={"name": "name"}))({}, {}, log)
+
+    def test_accept_json_tool_fails_on_xml(self, upstream, log):
+        upstream["/data"] = lambda: httpx.Response(
+            200, text="<?xml version='1.0'?><a/>", headers={"content-type": "application/xml"})
+        with pytest.raises(RuntimeError, match="expected JSON but got application/xml"):
+            make_run(self._tool(accept="application/json"))({}, {}, log)
+
+    def test_json_body_with_wrong_content_type_passes(self, upstream, log):
+        """The check parses the body; a mislabeled JSON body is accepted."""
+        upstream["/data"] = lambda: httpx.Response(
+            200, text='{"name": "TP53"}', headers={"content-type": "text/plain"})
+        result = make_run(self._tool(rmap={"name": "name"}))({}, {}, log)
+        assert result["name"] == "TP53"
+
+    def test_text_tool_accepts_plain_text(self, upstream, log):
+        upstream["/data"] = lambda: httpx.Response(
+            200, text="hsa:7157\tTP53", headers={"content-type": "text/plain"})
+        result = make_run(self._tool(rmap={"text": "text"}))({}, {}, log)
+        assert result["text"] == "hsa:7157\tTP53"
+
+    def test_text_tool_fails_on_html(self, upstream, log):
+        upstream["/data"] = lambda: httpx.Response(200, text=HTML, headers={"content-type": "text/html"})
+        with pytest.raises(RuntimeError, match="expected a text response but got HTML"):
+            make_run(self._tool(rmap={"text": "text"}))({}, {}, log)
+
+    def test_html_sniffed_without_content_type(self, upstream, log):
+        upstream["/data"] = lambda: httpx.Response(200, text=HTML)
+        with pytest.raises(RuntimeError, match="expected a text response but got HTML"):
+            make_run(self._tool(rmap={"text": "text"}))({}, {}, log)
+
+    def test_tool_without_expectation_unchanged(self, upstream, log):
+        upstream["/data"] = lambda: httpx.Response(200, text=HTML, headers={"content-type": "text/html"})
+        result = make_run(self._tool())({}, {}, log)
+        assert result["raw"] == {"text": HTML}
+
+    def test_redirect_to_landing_page_fails(self, upstream, log):
+        """The case that motivated the guard: an allowed redirect ending on HTML."""
+        upstream["/data"] = lambda: httpx.Response(301, headers={"Location": "https://api.example.org/"})
+        upstream["/"] = lambda: httpx.Response(200, text=HTML, headers={"content-type": "text/html"})
+        with pytest.raises(RuntimeError, match="expected JSON but got text/html"):
+            make_run(self._tool(accept="application/json"))({}, {}, log)
+
+    def test_error_message_has_no_query_secret(self, upstream, log):
+        upstream["/data"] = lambda: httpx.Response(200, text=HTML, headers={"content-type": "text/html"})
+        with pytest.raises(RuntimeError) as exc:
+            make_run(self._tool(rmap={"name": "name"}))({"key": "s3cr3t"}, {}, log)
+        assert "s3cr3t" not in str(exc.value)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Query string in the URL template (httpx 0.28 params= regression)
+# ═════════════════════════════════════════════════════════════════════════════
+
+class TestUrlQueryPreserved:
+    """httpx 0.28 replaces a URL's whole query string whenever params= is
+    passed, even {}. These go through a real httpx transport so they catch
+    that regardless of how the executor calls httpx."""
+
+    @pytest.fixture
+    def sent(self, monkeypatch):
+        real_client = httpx.Client
+        seen: list = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(200, json=[{"ok": True}])
+
+        monkeypatch.setattr(
+            httpx, "Client",
+            lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw),
+        )
+        return seen
+
+    @staticmethod
+    def _tool(url: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        return {
+            "tool_id": "q",
+            "inputs_schema": {"properties": {
+                "diplotype": {"type": "string"},
+                "limit": {"type": "integer"},
+            }},
+            "http": {"method": "GET", "url": url, **({"params": params} if params is not None else {})},
+        }
+
+    def test_query_and_no_params_sent_verbatim(self, sent):
+        """The CPIC case: a filter in the URL template and no params block."""
+        url = "https://api.cpicpgx.org/v1/diplotype?genesymbol=eq.CYP2C9&diplotype=eq.{diplotype}"
+        make_run(self._tool(url))({"diplotype": "*1/*3"}, {}, MagicMock())
+        assert str(sent[0].url) == "https://api.cpicpgx.org/v1/diplotype?genesymbol=eq.CYP2C9&diplotype=eq.*1/*3"
+        assert sent[0].url.params["diplotype"] == "eq.*1/*3"
+
+    def test_query_and_empty_params_block(self, sent):
+        """An explicit empty params block must not erase the URL's query."""
+        url = "https://api.example.org/s?gene=TP53"
+        make_run(self._tool(url, params={}))({}, {}, MagicMock())
+        assert str(sent[0].url) == url
+
+    def test_query_plus_extra_params(self, sent):
+        """URL pairs are kept in order and params are appended."""
+        url = "https://api.example.org/s?db=gene&term={diplotype}"
+        make_run(self._tool(url, params={"retmax": "{limit}", "fmt": "json"}))(
+            {"diplotype": "TP53", "limit": 5}, {}, MagicMock())
+        assert sent[0].url.params.multi_items() == [
+            ("db", "gene"), ("term", "TP53"), ("retmax", "5"), ("fmt", "json")]
+
+    def test_param_replaces_same_key_in_url(self, sent):
+        """A key in both places takes the params value, as httpx 0.27 did."""
+        url = "https://api.example.org/s?format=xml&id=1"
+        make_run(self._tool(url, params={"format": "json"}))({}, {}, MagicMock())
+        assert sent[0].url.params.multi_items() == [("id", "1"), ("format", "json")]
+
+    def test_repeated_keys_kept(self, sent):
+        """Repeated keys in the URL survive, with and without extra params."""
+        url = "https://api.example.org/s?id=1&id=2&id=3"
+        make_run(self._tool(url))({}, {}, MagicMock())
+        make_run(self._tool(url, params={"fmt": "json"}))({}, {}, MagicMock())
+        assert sent[0].url.params.get_list("id") == ["1", "2", "3"]
+        assert sent[1].url.params.get_list("id") == ["1", "2", "3"]
+        assert sent[1].url.params["fmt"] == "json"
+
+    def test_encoded_values_round_trip(self, sent):
+        """Pre-encoded and reserved characters reach the upstream unchanged
+        in meaning, whether they come from the URL or from params."""
+        url = "https://api.example.org/s?a=eq.%2A1%2F%2A3&b=x+y&c={diplotype}"
+        make_run(self._tool(url, params={"d": "*1/*3", "e": "a&b=c"}))(
+            {"diplotype": "*2/*2"}, {}, MagicMock())
+        p = sent[0].url.params
+        assert p["a"] == "eq.*1/*3"
+        assert p["b"] == "x y"
+        assert p["c"] == "*2/*2"
+        assert p["d"] == "*1/*3"
+        assert p["e"] == "a&b=c"
+
+    def test_fragment_and_path_untouched(self, sent):
+        url = "https://api.example.org/v1/genes/TP53?species=human"
+        make_run(self._tool(url, params={"fmt": "json"}))({}, {}, MagicMock())
+        assert sent[0].url.path == "/v1/genes/TP53"
+        assert sent[0].url.params.multi_items() == [("species", "human"), ("fmt", "json")]
+
+    def test_post_keeps_url_query(self, sent):
+        tool = self._tool("https://api.example.org/q?format=json", params={"v": "2"})
+        tool["http"].update(method="POST", body_map={"ids": ["P04637"]})
+        make_run(tool)({}, {}, MagicMock())
+        assert sent[0].method == "POST"
+        assert sent[0].url.params.multi_items() == [("format", "json"), ("v", "2")]
