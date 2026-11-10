@@ -326,8 +326,9 @@ class TestMakeRunGet:
 
         with patch("httpx.Client.get", return_value=mock_resp) as mock_get:
             run({"query": "MYC"}, {}, log)   # limit not provided → default 10
-            _, kwargs = mock_get.call_args
-            assert kwargs["params"]["limit"] == 10
+            # Params are folded into the URL itself (see _merge_query).
+            assert httpx.URL(mock_get.call_args[0][0]).params["limit"] == "10"
+            assert "params" not in mock_get.call_args.kwargs
 
     def test_log_called_twice(self, run, log):
         """A successful run logs exactly twice: once for the outgoing
@@ -595,8 +596,7 @@ class TestMakeRunIntegerParamFallback:
 
         with patch("httpx.Client.get", return_value=mock_resp) as mock_get:
             run({"count": "not-a-number"}, {}, MagicMock())
-            _, kwargs = mock_get.call_args
-            assert kwargs["params"]["count"] == "not-a-number"
+            assert httpx.URL(mock_get.call_args[0][0]).params["count"] == "not-a-number"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # inputs_schema fallback / http.body alias
@@ -639,15 +639,15 @@ class TestInputsSchemaFallback:
         with patch("httpx.Client.get", return_value=_make_mock_response({})) as mock_get:
             run({"region": "9:22125503-22125502:1", "allele": "C", "page_size": 5}, {}, log)
         args, kwargs = mock_get.call_args
-        assert args[0] == "https://rest.example.org/vep/human/region/9:22125503-22125502:1/C"
-        assert kwargs["params"] == {"size": "5"}
+        assert args[0] == "https://rest.example.org/vep/human/region/9:22125503-22125502:1/C?size=5"
+        assert "params" not in kwargs
 
     def test_unset_optional_schema_param_dropped(self, log):
         """An optional schema property with no value is dropped from the query."""
         run = make_run(SCHEMA_ONLY_TOOL_DEF)
         with patch("httpx.Client.get", return_value=_make_mock_response({})) as mock_get:
             run({"region": "1:1-2", "allele": "A"}, {}, log)
-        assert mock_get.call_args.kwargs["params"] == {}
+        assert mock_get.call_args[0][0] == "https://rest.example.org/vep/human/region/1:1-2/A"
 
     def test_schema_required_enforced(self):
         """inputs_schema.required is enforced by validate()."""
@@ -955,3 +955,101 @@ class TestResponseKindGuard:
         with pytest.raises(RuntimeError) as exc:
             make_run(self._tool(rmap={"name": "name"}))({"key": "s3cr3t"}, {}, log)
         assert "s3cr3t" not in str(exc.value)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Query string in the URL template (httpx 0.28 params= regression)
+# ═════════════════════════════════════════════════════════════════════════════
+
+class TestUrlQueryPreserved:
+    """httpx 0.28 replaces a URL's whole query string whenever params= is
+    passed, even {}. These go through a real httpx transport so they catch
+    that regardless of how the executor calls httpx."""
+
+    @pytest.fixture
+    def sent(self, monkeypatch):
+        real_client = httpx.Client
+        seen: list = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(200, json=[{"ok": True}])
+
+        monkeypatch.setattr(
+            httpx, "Client",
+            lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw),
+        )
+        return seen
+
+    @staticmethod
+    def _tool(url: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        return {
+            "tool_id": "q",
+            "inputs_schema": {"properties": {
+                "diplotype": {"type": "string"},
+                "limit": {"type": "integer"},
+            }},
+            "http": {"method": "GET", "url": url, **({"params": params} if params is not None else {})},
+        }
+
+    def test_query_and_no_params_sent_verbatim(self, sent):
+        """The CPIC case: a filter in the URL template and no params block."""
+        url = "https://api.cpicpgx.org/v1/diplotype?genesymbol=eq.CYP2C9&diplotype=eq.{diplotype}"
+        make_run(self._tool(url))({"diplotype": "*1/*3"}, {}, MagicMock())
+        assert str(sent[0].url) == "https://api.cpicpgx.org/v1/diplotype?genesymbol=eq.CYP2C9&diplotype=eq.*1/*3"
+        assert sent[0].url.params["diplotype"] == "eq.*1/*3"
+
+    def test_query_and_empty_params_block(self, sent):
+        """An explicit empty params block must not erase the URL's query."""
+        url = "https://api.example.org/s?gene=TP53"
+        make_run(self._tool(url, params={}))({}, {}, MagicMock())
+        assert str(sent[0].url) == url
+
+    def test_query_plus_extra_params(self, sent):
+        """URL pairs are kept in order and params are appended."""
+        url = "https://api.example.org/s?db=gene&term={diplotype}"
+        make_run(self._tool(url, params={"retmax": "{limit}", "fmt": "json"}))(
+            {"diplotype": "TP53", "limit": 5}, {}, MagicMock())
+        assert sent[0].url.params.multi_items() == [
+            ("db", "gene"), ("term", "TP53"), ("retmax", "5"), ("fmt", "json")]
+
+    def test_param_replaces_same_key_in_url(self, sent):
+        """A key in both places takes the params value, as httpx 0.27 did."""
+        url = "https://api.example.org/s?format=xml&id=1"
+        make_run(self._tool(url, params={"format": "json"}))({}, {}, MagicMock())
+        assert sent[0].url.params.multi_items() == [("id", "1"), ("format", "json")]
+
+    def test_repeated_keys_kept(self, sent):
+        """Repeated keys in the URL survive, with and without extra params."""
+        url = "https://api.example.org/s?id=1&id=2&id=3"
+        make_run(self._tool(url))({}, {}, MagicMock())
+        make_run(self._tool(url, params={"fmt": "json"}))({}, {}, MagicMock())
+        assert sent[0].url.params.get_list("id") == ["1", "2", "3"]
+        assert sent[1].url.params.get_list("id") == ["1", "2", "3"]
+        assert sent[1].url.params["fmt"] == "json"
+
+    def test_encoded_values_round_trip(self, sent):
+        """Pre-encoded and reserved characters reach the upstream unchanged
+        in meaning, whether they come from the URL or from params."""
+        url = "https://api.example.org/s?a=eq.%2A1%2F%2A3&b=x+y&c={diplotype}"
+        make_run(self._tool(url, params={"d": "*1/*3", "e": "a&b=c"}))(
+            {"diplotype": "*2/*2"}, {}, MagicMock())
+        p = sent[0].url.params
+        assert p["a"] == "eq.*1/*3"
+        assert p["b"] == "x y"
+        assert p["c"] == "*2/*2"
+        assert p["d"] == "*1/*3"
+        assert p["e"] == "a&b=c"
+
+    def test_fragment_and_path_untouched(self, sent):
+        url = "https://api.example.org/v1/genes/TP53?species=human"
+        make_run(self._tool(url, params={"fmt": "json"}))({}, {}, MagicMock())
+        assert sent[0].url.path == "/v1/genes/TP53"
+        assert sent[0].url.params.multi_items() == [("species", "human"), ("fmt", "json")]
+
+    def test_post_keeps_url_query(self, sent):
+        tool = self._tool("https://api.example.org/q?format=json", params={"v": "2"})
+        tool["http"].update(method="POST", body_map={"ids": ["P04637"]})
+        make_run(tool)({}, {}, MagicMock())
+        assert sent[0].method == "POST"
+        assert sent[0].url.params.multi_items() == [("format", "json"), ("v", "2")]

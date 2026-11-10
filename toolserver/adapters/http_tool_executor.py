@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 from typing import Any, Callable, Dict, List
+from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
 import httpx
 
@@ -30,6 +31,31 @@ def _resolve(template: str, inputs: Dict) -> str:
         lambda m: str(inputs.get(m.group(1), m.group(0))),
         str(template),
     )
+
+
+def _merge_query(url: str, params: Dict[str, Any]) -> str:
+    """Return ``url`` with ``params`` added to the query string it already has.
+
+    httpx 0.28 replaces a URL's whole query string whenever ``params=`` is
+    passed, even an empty dict, so filters written into a tool's URL
+    template (``?genesymbol=eq.{gene}``) were silently dropped. The request
+    is therefore sent with the final URL and no ``params=``.
+
+    With no params the URL is returned byte for byte. Otherwise the URL's
+    own query pairs are kept verbatim, in order, including repeated keys,
+    except pairs whose key is also in ``params``: an explicit param replaces
+    them, as httpx 0.27 did. Added pairs use httpx's own encoding.
+    """
+    if not params:
+        return url
+    parts = urlsplit(url)
+    kept = [
+        seg for seg in parts.query.split("&")
+        if seg and unquote_plus(seg.split("=", 1)[0]) not in params
+    ]
+    added = str(httpx.QueryParams(params))
+    query = "&".join(kept + ([added] if added else []))
+    return urlunsplit(parts._replace(query=query))
 
 
 def _get_nested(data: Any, path: str) -> Any:
@@ -338,13 +364,15 @@ def make_run(tool_def: Dict) -> Callable:
         log(f"[{tool_def.get('tool_id', '?')}] {method} {url} inputs={safe_inputs}")
 
         # Execute
+        # Never pass params= to httpx: see _merge_query.
+        request_url = _merge_query(url, params)
         with httpx.Client(timeout=timeout) as client:
             if method == "GET":
-                resp = client.get(url, params=params, headers=headers)
+                resp = client.get(request_url, headers=headers)
             elif method == "POST" and body_type == "form":
-                resp = client.post(url, data=body_map, params=params, headers=headers)
+                resp = client.post(request_url, data=body_map, headers=headers)
             elif method == "POST":
-                resp = client.post(url, json=body_map, params=params, headers=headers)
+                resp = client.post(request_url, json=body_map, headers=headers)
             else:
                 raise ValueError(f"Unsupported HTTP method: {method}")
 
