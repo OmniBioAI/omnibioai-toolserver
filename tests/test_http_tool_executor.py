@@ -741,6 +741,85 @@ class TestBodyAlias:
         }
 
 
+class TestTypedJsonBody:
+    """JSON bodies keep JSON types: literal numbers, booleans and null stay
+    typed, a value that is exactly one placeholder takes the input's type, and
+    every other template string is a string. Form bodies stay all-string."""
+
+    @pytest.fixture
+    def log(self):
+        return MagicMock()
+
+    def _tool(self, body: Dict[str, Any], props: Dict[str, Any], body_type: str = "json") -> Dict[str, Any]:
+        return {
+            "tool_id": "rcsb_search",
+            "inputs_schema": {"properties": props},
+            "http": {
+                "method": "POST",
+                "url": "https://search.example.org/query",
+                "body_type": body_type,
+                "body": body,
+            },
+        }
+
+    def _sent(self, tool_def: Dict[str, Any], inputs: Dict[str, Any], log) -> Any:
+        with patch("httpx.Client.post", return_value=_make_mock_response({})) as mock_post:
+            make_run(tool_def)(inputs, {}, log)
+        return mock_post.call_args.kwargs
+
+    def test_literal_numbers_bools_null_stay_typed(self, log):
+        """Literals written in the tool definition are sent with their JSON types."""
+        body = {"query": {"parameters": {"evalue_cutoff": 1, "identity_cutoff": 0.9,
+                                         "exact": True, "filter": None, "value": "{sequence}"}}}
+        sent = self._sent(self._tool(body, {"sequence": {"type": "string"}}), {"sequence": "MVLS"}, log)
+        assert sent["json"] == {"query": {"parameters": {"evalue_cutoff": 1, "identity_cutoff": 0.9,
+                                                         "exact": True, "filter": None, "value": "MVLS"}}}
+
+    def test_nested_lists_keep_typed_literals(self, log):
+        """Typed literals inside nested lists and dicts are preserved."""
+        body = {"residue_ids": [{"label_asym_id": "A", "label_seq_id": 162},
+                                {"label_asym_id": "A", "label_seq_id": 193}]}
+        sent = self._sent(self._tool(body, {}), {}, log)
+        assert sent["json"] == body
+
+    def test_whole_placeholder_takes_input_type(self, log):
+        """"{name}" alone resolves to the input value itself: int, list, dict."""
+        body = {"size": "{size}", "ids": "{ids}",
+                "value": {"entry_id": "{entry_id}", "residue_ids": "{residues}"}}
+        props = {"size": {"type": "integer"}, "ids": {"type": "array"},
+                 "entry_id": {"type": "string"}, "residues": {"type": "array"}}
+        residues = [{"label_asym_id": "A", "label_seq_id": 162}]
+        inputs = {"size": 10, "ids": [770315, 417950], "entry_id": "2MNR", "residues": residues}
+        sent = self._sent(self._tool(body, props), inputs, log)
+        assert sent["json"] == {"size": 10, "ids": [770315, 417950],
+                                "value": {"entry_id": "2MNR", "residue_ids": residues}}
+
+    def test_template_strings_stay_strings(self, log):
+        """A placeholder inside a longer string, or a string input, resolves to a string."""
+        body = {"query": '{ gene(gene_symbol: "{gene}") { gene_id } }', "label": "n={size}", "name": "{gene}"}
+        props = {"gene": {"type": "string"}, "size": {"type": "integer"}}
+        sent = self._sent(self._tool(body, props), {"gene": "TP53", "size": 5}, log)
+        assert sent["json"] == {"query": '{ gene(gene_symbol: "TP53") { gene_id } }',
+                                "label": "n=5", "name": "TP53"}
+
+    def test_numeric_looking_string_input_stays_string(self, log):
+        """A string input that looks like a number is not converted."""
+        sent = self._sent(self._tool({"id": "{id}"}, {"id": {"type": "string"}}), {"id": "0042"}, log)
+        assert sent["json"] == {"id": "0042"}
+
+    def test_unknown_placeholder_left_verbatim(self, log):
+        """A placeholder with no matching input is left as written."""
+        sent = self._sent(self._tool({"x": "{missing}"}, {}), {}, log)
+        assert sent["json"] == {"x": "{missing}"}
+
+    def test_form_body_stays_all_string(self, log):
+        """Form bodies keep the previous behaviour: every value is a string."""
+        body = {"species": "{species}", "limit": 5}
+        sent = self._sent(self._tool(body, {"species": {"type": "integer"}}, body_type="form"),
+                          {"species": 9606}, log)
+        assert sent["data"] == {"species": "9606", "limit": "5"}
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Redirect policy
 # ═════════════════════════════════════════════════════════════════════════════

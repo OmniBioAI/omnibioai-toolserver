@@ -81,16 +81,32 @@ def _get_nested(data: Any, path: str) -> Any:
     return data
 
 
-def _resolve_value(value: Any, inputs: Dict) -> Any:
+_WHOLE_PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
+
+
+def _resolve_value(value: Any, inputs: Dict, typed: bool = True) -> Any:
     """Resolve placeholders inside strings of a (possibly nested) body value.
 
     Dicts and lists keep their structure so a JSON body such as a GraphQL
     {"query": ..., "variables": {...}} is sent as an object, not a repr.
+
+    With ``typed`` (JSON bodies), values keep their JSON types: numbers,
+    booleans and null written in the tool definition are sent as they are,
+    and a value that is exactly one placeholder ("{residue_ids}") takes the
+    input's own value (int, list, dict, ...). Any other string is a template
+    and resolves to a string. Without ``typed`` (form bodies) every leaf is
+    a string, as before.
     """
     if isinstance(value, dict):
-        return {k: _resolve_value(v, inputs) for k, v in value.items()}
+        return {k: _resolve_value(v, inputs, typed) for k, v in value.items()}
     if isinstance(value, list):
-        return [_resolve_value(v, inputs) for v in value]
+        return [_resolve_value(v, inputs, typed) for v in value]
+    if typed:
+        if not isinstance(value, str):
+            return value
+        m = _WHOLE_PLACEHOLDER_RE.fullmatch(value)
+        if m and m.group(1) in inputs and not isinstance(inputs[m.group(1)], str):
+            return inputs[m.group(1)]
     return _resolve(str(value), inputs)
 
 
@@ -349,7 +365,7 @@ def make_run(tool_def: Dict) -> Callable:
         # Body (POST only) — `body` is accepted as an alias for `body_map`
         body_type = http_cfg.get("body_type", "json")
         body_map: Dict[str, Any] = {
-            k: _resolve_value(v, resolved)
+            k: _resolve_value(v, resolved, typed=body_type != "form")
             for k, v in (http_cfg.get("body_map") or http_cfg.get("body") or {}).items()
         }
 
